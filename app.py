@@ -10,18 +10,31 @@ from file_optimizer import (
     handle_code_followup,
 )
 from project_optimizer import (
-    extract_zip_to_sandbox,
+    parse_zip_in_memory,
     build_repo_map_and_order,
     optimize_project_files,
-    package_sandbox_as_zip,
+    package_overlay_zip,
 )
-
 
 st.set_page_config(page_title="AI Agent & Universal Code Optimizer", page_icon="🤖", layout="wide")
 
 PROJECT_ROOT = Path(__file__).parent
 OUTPUTS_DIR = PROJECT_ROOT / "agent_outputs"
 METRICS_FILE = PROJECT_ROOT / "agent_metrics.jsonl"
+
+
+def format_tier_badge(approved: bool | None, tier: str) -> str:
+    """Returns an honest status label reflecting the actual verification depth."""
+    if approved is None:
+        return "🔍 Audited Only"
+    if not approved:
+        return f"⚠️ Needs Review ({tier})"
+    if tier == "tests_ran":
+        return "✅ Verified (Tests Ran & Approved)"
+    if tier == "syntax_only":
+        return "✅ Syntax Checked & Approved"
+    return "🟡 Approved (Unverified Format — Review Diff)"
+
 
 # --- SIDEBAR: TELEMETRY & SAVED NOTES ---
 with st.sidebar:
@@ -55,7 +68,7 @@ with st.sidebar:
 
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.messages = []
-        st.session_state.chat = create_agent_session(MODELS)
+        st.session_state.chat = create_agent_session(MODELS[0])
         st.rerun()
 
 # --- TOP-LEVEL TABS ---
@@ -69,7 +82,7 @@ tab_chat, tab_optimizer, tab_project = st.tabs([
 with tab_chat:
     st.title("🤖 Research & Sandboxed File Agent")
     if "chat" not in st.session_state:
-        st.session_state.chat = create_agent_session(MODELS)
+        st.session_state.chat = create_agent_session(MODELS[0])
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -118,7 +131,14 @@ with tab_optimizer:
             except UnicodeDecodeError:
                 st.error("Binary files are not supported. Please upload a UTF-8 text, code, or config file.")
     else:
-        ignored = {"app.py", "file_optimizer.py", "coding_loop.py", ".env"}
+        ignored = {
+            "app.py",
+            "file_optimizer.py",
+            "project_optimizer.py",
+            "tools.py",
+            "coding_loop.py",
+            ".env",
+        }
         local_files = sorted(
             [
                 f.name
@@ -147,7 +167,6 @@ with tab_optimizer:
 
         col_audit, col_opt = st.columns(2)
 
-        # STEP 1: AUDIT & LIST LIMITATIONS
         with col_audit:
             if st.button("🔍 Step 1: Audit Security & Limitations", use_container_width=True):
                 with st.spinner(f"Auditing `{target_filename}` ({lang_name})..."):
@@ -156,7 +175,6 @@ with tab_optimizer:
                     st.session_state.opt_result = None
                     st.session_state.code_qa_history = []
 
-        # STEP 2: OPTIMIZE & VERIFY
         with col_opt:
             audit_ready = (
                 st.session_state.get("audited_file") == target_filename
@@ -173,22 +191,22 @@ with tab_optimizer:
                     )
                     st.session_state.opt_result = result
                     st.session_state.code_qa_history = []
+                    badge_label = format_tier_badge(result["approved"], result.get("verification_tier", "none"))
                     status.update(
-                        label="✅ Optimization Verified & Approved!" if result["approved"] else "⚠️ Max Iterations Reached",
+                        label=badge_label,
                         state="complete" if result["approved"] else "error",
                     )
 
-        # DISPLAY AUDIT REPORT
         if st.session_state.get("audited_file") == target_filename and st.session_state.get("audit_report"):
             st.divider()
             st.subheader(f"📋 Audit & Limitations Report: `{target_filename}`")
             st.markdown(st.session_state.audit_report)
 
-        # DISPLAY OPTIMIZATION DIFF & PROMOTION GATE
         if st.session_state.get("opt_result"):
             res = st.session_state.opt_result
+            tier = res.get("verification_tier", "none")
             st.divider()
-            st.subheader("🧪 Optimization Results & Unified Diff")
+            st.subheader(f"🧪 Optimization Results — {format_tier_badge(res['approved'], tier)}")
 
             for entry in res["logs"]:
                 st.write(entry)
@@ -202,7 +220,7 @@ with tab_optimizer:
                 if res["test_code"]:
                     st.code(res["test_code"], language=syntax_lang)
                 else:
-                    st.info(f"Config/Script mode (`{lang_name}`): Verified via deterministic syntax parser and Reviewer gate.")
+                    st.info(f"Verification Tier `{tier}` (`{lang_name}`): Verified without standalone unit tests.")
 
             col_dl, col_promote = st.columns(2)
             with col_dl:
@@ -216,11 +234,10 @@ with tab_optimizer:
             with col_promote:
                 if source_mode == "Select a file from project folder" and res["approved"]:
                     if st.button(f"🚀 Promote & Overwrite Live `{target_filename}`", type="primary", use_container_width=True):
-                        (PROJECT_ROOT / target_filename).write_text(res["optimized_code"], encoding="utf-8")
+                        (PROJECT_ROOT / target_filename).write_text(res["optimized_code"], encoding="utf-8")                        
                         st.success(f"Live `{target_filename}` updated! Reloading...")
                         st.rerun()
 
-            # --- NEW: FOLLOW-UP Q&A & RE-OPTIMIZE BOX ---
             st.divider()
             st.subheader("💬 Ask About the Optimized Code or Request Changes")
             st.caption("Ask why a change was made, or instruct the agent to modify and re-verify the file.")
@@ -252,34 +269,38 @@ with tab_optimizer:
                         f_status.update(label="✅ Answered!", state="complete")
                     else:
                         st.session_state.opt_result = outcome
+                        new_badge = format_tier_badge(outcome["approved"], outcome.get("verification_tier", "none"))
                         msg = (
                             f"🔄 **Re-optimized `{target_filename}`** based on: *{outcome['instruction']}*\n\n"
-                            f"Status: {'✅ Verified & Approved' if outcome['approved'] else '⚠️ Max iterations reached'}. "
-                            f"Check the **Unified Diff** and **Optimized File** tabs above!"
+                            f"Status: {new_badge}. Check the **Unified Diff** and **Optimized File** tabs above!"
                         )
                         st.session_state.code_qa_history.append({"role": "assistant", "content": msg})
                         f_status.update(label="✅ Code Updated & Re-verified!", state="complete")
                 st.rerun()
 
-
 # ================= TAB 3: FULL PROJECT (.ZIP) OPTIMIZER =================
 with tab_project:
     st.title("🗂️ Full Project (.zip) Security & Optimization Pipeline")
     st.caption(
-        "Upload a project .zip → Automatically filters junk folders → Builds a low-token AST dependency map → "
-        "Audits & optimizes files in topological order → Exports a clean .zip + PROJECT_AUDIT_REPORT.md."
+        "Upload a project .zip → Filters junk folders → Builds a low-token AST dependency map → "
+        "Audits & optimizes files in isolated temp directories → Overlays changes onto your full archive."
     )
 
     uploaded_zip = st.file_uploader("Upload a zipped project folder (.zip)", type=["zip"])
 
     if uploaded_zip is not None:
         if st.session_state.get("last_zip_name") != uploaded_zip.name:
-            extracted = extract_zip_to_sandbox(uploaded_zip.getvalue())
-            repo_map, ordered_files = build_repo_map_and_order(extracted)
-            st.session_state.last_zip_name = uploaded_zip.name
-            st.session_state.proj_files = ordered_files
-            st.session_state.proj_repo_map = repo_map
-            st.session_state.proj_results = None
+            try:
+                all_files, code_files = parse_zip_in_memory(uploaded_zip.getvalue())
+                repo_map, ordered_files = build_repo_map_and_order(code_files)
+                st.session_state.last_zip_name = uploaded_zip.name
+                st.session_state.proj_all_files = all_files
+                st.session_state.proj_code_files = code_files
+                st.session_state.proj_files = ordered_files
+                st.session_state.proj_repo_map = repo_map
+                st.session_state.proj_results = None
+            except ValueError as e:
+                st.error(f"Zip validation failed: {e}")
 
         ordered_files = st.session_state.get("proj_files", [])
         repo_map = st.session_state.get("proj_repo_map", "")
@@ -313,6 +334,7 @@ with tab_project:
                 with st.status("Processing project files one by one...", expanded=True) as p_status:
                     proj_res = optimize_project_files(
                         selected_files=selected_files,
+                        code_files=st.session_state.proj_code_files,
                         repo_map=repo_map,
                         extra_goals=proj_goals,
                         audit_only=run_audit_only,
@@ -326,7 +348,7 @@ with tab_project:
                 st.divider()
                 st.subheader("📦 Export Optimized Project & Full Audit Report")
 
-                zip_output = package_sandbox_as_zip(proj_res)
+                zip_output = package_overlay_zip(st.session_state.proj_all_files, proj_res)
                 st.download_button(
                     label="⬇️ Download Optimized Project (.zip + PROJECT_AUDIT_REPORT.md)",
                     data=zip_output,
@@ -338,8 +360,10 @@ with tab_project:
 
                 st.subheader("📄 File-by-File Results")
                 for rel_path, data in proj_res.items():
-                    badge = "🔍 Audited" if data["approved"] is None else ("✅ Approved" if data["approved"] else "⚠️ Needs Review")
+                    badge = format_tier_badge(data["approved"], data.get("verification_tier", "none"))
                     with st.expander(f"{badge} — `{rel_path}`", expanded=False):
+                        for log_line in data.get("logs", []):
+                            st.write(log_line)
                         t1, t2, t3 = st.tabs(["📋 Audit & Limitations", "🔀 Unified Diff", "✅ Final Code"])
                         with t1:
                             st.markdown(data["audit_report"])

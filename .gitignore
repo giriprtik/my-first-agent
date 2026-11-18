@@ -1,5 +1,10 @@
 .env
 venv/
-workspace*
+.venv/
 __pycache__/
 *.pyc
+workspace/
+workspace_project/
+agent_outputs/
+agent_metrics.jsonl
+.DS_Store
