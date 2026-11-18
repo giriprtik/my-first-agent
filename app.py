@@ -12,9 +12,11 @@ from file_optimizer import (
 from project_optimizer import (
     parse_zip_in_memory,
     build_repo_map_and_order,
-    optimize_project_files,
+    build_neighbor_context,
     package_overlay_zip,
+    check_cross_file_consistency,
 )
+
 
 st.set_page_config(page_title="AI Agent & Universal Code Optimizer", page_icon="🤖", layout="wide")
 
@@ -278,12 +280,12 @@ with tab_optimizer:
                         f_status.update(label="✅ Code Updated & Re-verified!", state="complete")
                 st.rerun()
 
-# ================= TAB 3: FULL PROJECT (.ZIP) OPTIMIZER =================
+# ================= TAB 3: GUIDED PROJECT (.ZIP) WORKBENCH =================
 with tab_project:
-    st.title("🗂️ Full Project (.zip) Security & Optimization Pipeline")
+    st.title("🗂️ Guided Project (.zip) Step-by-Step Workbench")
     st.caption(
-        "Upload a project .zip → Filters junk folders → Builds a low-token AST dependency map → "
-        "Audits & optimizes files in isolated temp directories → Overlays changes onto your full archive."
+        "Upload a project .zip → Automatically orders files by dependency (DTOs/utilities first) → "
+        "Work through one file at a time with full imported-file context, diff inspection, and Q&A."
     )
 
     uploaded_zip = st.file_uploader("Upload a zipped project folder (.zip)", type=["zip"])
@@ -292,84 +294,360 @@ with tab_project:
         if st.session_state.get("last_zip_name") != uploaded_zip.name:
             try:
                 all_files, code_files = parse_zip_in_memory(uploaded_zip.getvalue())
-                repo_map, ordered_files = build_repo_map_and_order(code_files)
+                repo_map, ordered_files, dep_map = build_repo_map_and_order(code_files)
                 st.session_state.last_zip_name = uploaded_zip.name
                 st.session_state.proj_all_files = all_files
-                st.session_state.proj_code_files = code_files
-                st.session_state.proj_files = ordered_files
+                st.session_state.proj_orig_code = dict(code_files)
+                st.session_state.proj_working_tree = dict(code_files)
+                st.session_state.proj_ordered_files = ordered_files
+                st.session_state.proj_dep_map = dep_map
                 st.session_state.proj_repo_map = repo_map
-                st.session_state.proj_results = None
+                st.session_state.proj_audits = {}
+                st.session_state.proj_results = {}
+                st.session_state.proj_completed = set()
+                st.session_state.proj_qa = {}
+                st.session_state.proj_learned_rules = []
+                st.session_state.proj_active_file = ordered_files[0] if ordered_files else None
             except ValueError as e:
                 st.error(f"Zip validation failed: {e}")
 
-        ordered_files = st.session_state.get("proj_files", [])
-        repo_map = st.session_state.get("proj_repo_map", "")
-
-        if not ordered_files:
+        all_ordered_files = st.session_state.get("proj_ordered_files", [])
+        if not all_ordered_files:
             st.warning("No supported code or config files found inside this .zip archive.")
         else:
-            st.success(f"Found **{len(ordered_files)}** code/config files (sorted in dependency order: utilities first, entrypoints last).")
+            # --- FILE SCOPE FILTER (UNSELECT FILES YOU WANT TO SKIP) ---
+            with st.expander(f"🎯 Filter Active Files ({len(all_ordered_files)} detected in archive)", expanded=False):
+                st.caption(
+                    "Unselect files you want to skip. Skipped files remain in the Repository Map for cross-file context and stay untouched in the final .zip."
+                )
+                active_scope = st.multiselect(
+                    "Files included in your optimization queue:",
+                    options=all_ordered_files,
+                    default=st.session_state.get("proj_selected_scope", all_ordered_files),
+                    key="proj_scope_multiselect",
+                )
+                st.session_state.proj_selected_scope = active_scope
 
-            with st.expander("🗺️ View Compact Repository Map (Low-Token Blueprint)", expanded=False):
-                st.code(repo_map, language="markdown")
+            ordered_files = st.session_state.get("proj_selected_scope", all_ordered_files)
 
-            selected_files = st.multiselect(
-                "Select which files to include in this run (deselect any you want to skip to save tokens):",
-                options=ordered_files,
-                default=ordered_files,
-            )
+            if not ordered_files:
+                st.info("No files selected in your active queue. Re-select at least one file above to begin.")
+                st.stop()
 
-            proj_goals = st.text_input(
-                "Project-wide optimization goals (optional):",
-                placeholder="e.g., Harden security, add type hints, standardize error handling...",
-            )
+            completed_set = st.session_state.proj_completed
+            audits_map = st.session_state.proj_audits
+            dep_map = st.session_state.proj_dep_map
+            working_tree = st.session_state.proj_working_tree
 
-            col_mode1, col_mode2 = st.columns(2)
-            with col_mode1:
-                run_audit_only = st.button("🔍 Audit All Selected Files Only (Fast & Ultra-Low Tokens)", use_container_width=True)
-            with col_mode2:
-                run_full_opt = st.button("⚡ Audit + Optimize + Verify All Selected Files", type="primary", use_container_width=True)
+            # Count progress strictly among your selected files
+            completed_in_scope = [f for f in ordered_files if f in completed_set]
+            remaining = [f for f in ordered_files if f not in completed_set]
+            recommended_next = remaining[0] if remaining else None
 
-            if (run_audit_only or run_full_opt) and selected_files:
-                with st.status("Processing project files one by one...", expanded=True) as p_status:
-                    proj_res = optimize_project_files(
-                        selected_files=selected_files,
-                        code_files=st.session_state.proj_code_files,
-                        repo_map=repo_map,
-                        extra_goals=proj_goals,
-                        audit_only=run_audit_only,
-                        status_callback=lambda m: p_status.write(m),
+            # Top progress & export bar
+            col_prog, col_zip_dl = st.columns([2, 1])
+            with col_prog:
+                st.progress(len(completed_in_scope) / len(ordered_files))
+                if recommended_next:
+                    st.info(
+                        f"👉 **Recommended Next File:** `{recommended_next}` "
+                        f"({len(completed_in_scope)}/{len(ordered_files)} selected files completed)"
                     )
-                    st.session_state.proj_results = proj_res
-                    p_status.update(label="✅ Project Run Complete!", state="complete")
+                else:
+                    st.success(f"🎉 All {len(ordered_files)} selected files completed!")
 
-            if st.session_state.get("proj_results"):
-                proj_res = st.session_state.proj_results
-                st.divider()
-                st.subheader("📦 Export Optimized Project & Full Audit Report")
-
-                zip_output = package_overlay_zip(st.session_state.proj_all_files, proj_res)
+            with col_zip_dl:
+                zip_bytes = package_overlay_zip(
+                    st.session_state.proj_all_files,
+                    working_tree,
+                    audits_map,
+                    completed_set,
+                )
                 st.download_button(
-                    label="⬇️ Download Optimized Project (.zip + PROJECT_AUDIT_REPORT.md)",
-                    data=zip_output,
+                    label=f"⬇️ Download Project .zip ({len(completed_set)} updated)",
+                    data=zip_bytes,
                     file_name=f"optimized_{uploaded_zip.name}",
                     mime="application/zip",
                     type="primary",
                     use_container_width=True,
                 )
 
-                st.subheader("📄 File-by-File Results")
-                for rel_path, data in proj_res.items():
-                    badge = format_tier_badge(data["approved"], data.get("verification_tier", "none"))
-                    with st.expander(f"{badge} — `{rel_path}`", expanded=False):
-                        for log_line in data.get("logs", []):
-                            st.write(log_line)
-                        t1, t2, t3 = st.tabs(["📋 Audit & Limitations", "🔀 Unified Diff", "✅ Final Code"])
-                        with t1:
-                            st.markdown(data["audit_report"])
-                        with t2:
-                            st.code(data["diff"] or "No changes made.", language="diff")
-                        with t3:
-                            _, syn_lang, _ = get_language_info(Path(rel_path).name)
-                            st.code(data["optimized_code"], language=syn_lang)
+            with st.expander("🗺️ View Compact Repository Map & Dependency Order", expanded=False):
+                st.code(st.session_state.proj_repo_map, language="markdown")
 
+            # --- PERSISTENT SESSION MEMORY (LEARNED FROM FOLLOW-UPS) ---
+            learned_rules = st.session_state.setdefault("proj_learned_rules", [])
+            with st.expander(f"🧠 Session Memory & Learned Rules ({len(learned_rules)} active)", expanded=bool(learned_rules)):
+                st.caption("Corrections you make in follow-ups are automatically saved here and enforced on all future files.")
+                rules_text = st.text_area(
+                    "Active rules (one per line):",
+                    value="\n".join(learned_rules),
+                    height=110,
+                    key="session_rules_editor",
+                )
+                if st.button("💾 Save Rules Update", key="save_session_rules"):
+                    st.session_state.proj_learned_rules = [
+                        line.strip().lstrip("- ").strip()
+                        for line in rules_text.splitlines()
+                        if line.strip()
+                    ]
+                    st.success("Session rules updated for all upcoming files!")
+
+            # --- VISUAL CROSS-FILE CONSISTENCY CHECK ---
+            col_chk_btn, col_chk_info = st.columns([1, 2])
+            with col_chk_btn:
+                if st.button(
+                    f"🔗 Run Cross-File Consistency Check ({len(completed_set)} saved)",
+                    disabled=len(completed_set) == 0,
+                    use_container_width=True,
+                ):
+                    with st.spinner("Auditing cross-file method calls, getters, and repository contracts..."):
+                        st.session_state.proj_consistency = check_cross_file_consistency(
+                            working_tree=working_tree,
+                            completed_files=completed_set,
+                            repo_map=st.session_state.proj_repo_map,
+                        )
+            with col_chk_info:
+                st.caption(
+                    "Verifies that every method call, DTO getter, and repository query in your saved files actually exists in its imported target class."
+                )
+
+            if st.session_state.get("proj_consistency"):
+                cons = st.session_state.proj_consistency
+                pairs = cons.get("checked_pairs", [])
+
+                with st.container(border=True):
+                    st.subheader("🧭 Cross-File Dependency & Contract Report")
+                    if pairs:
+                        st.markdown(
+                            "**Verified Dependency Links:** "
+                            + " • ".join(f"`{Path(a).name}` ➔ `{Path(b).name}`" for a, b in pairs)
+                        )
+
+                    if cons["consistent"] and not cons["issues"]:
+                        st.success("✅ All cross-file method calls, getters, and repository contracts match!")
+                    else:
+                        st.error(f"⚠️ Found {len(cons['issues'])} cross-file contract mismatch(es):")
+                        for idx_i, issue in enumerate(cons["issues"], start=1):
+                            caller = issue.get("caller_file", "Unknown")
+                            target = issue.get("target_file", "Unknown")
+                            sym = issue.get("symbol", "unknown")
+                            desc = issue.get("description", "")
+                            fix = issue.get("suggested_fix", "")
+
+                            st.markdown(
+                                f"**{idx_i}. `{Path(caller).name}` ➔ `{Path(target).name}` (`{sym}`)**\n"
+                                f"- **Mismatch:** {desc}\n"
+                                f"- **Suggested Fix:** {fix}"
+                            )
+                            if caller in ordered_files:
+                                if st.button(f"🛠️ Jump to `{Path(caller).name}` to Fix", key=f"jump_fix_{idx_i}_{caller}"):
+                                    st.session_state.proj_active_file = caller
+                                    st.rerun()
+
+            # File selector with status badges
+            def _format_file_option(path_str: str) -> str:
+                if path_str in completed_set:
+                    prefix = "✅ [Saved]"
+                elif path_str == recommended_next:
+                    prefix = "👉 [Next]"
+                elif path_str in audits_map:
+                    prefix = "🔍 [Audited]"
+                else:
+                    prefix = "⬜ [Pending]"
+                return f"{prefix} {path_str}"
+
+            default_idx = (
+                ordered_files.index(st.session_state.proj_active_file)
+                if st.session_state.get("proj_active_file") in ordered_files
+                else 0
+            )
+
+            active_file = st.selectbox(
+                "Select file to inspect & optimize (ordered from dependencies → dependents):",
+                options=ordered_files,
+                index=default_idx,
+                format_func=_format_file_option,
+            )
+            st.session_state.proj_active_file = active_file
+
+            # Show which local files this file imports
+            file_deps = dep_map.get(active_file, [])
+            if file_deps:
+                unoptimized_deps = [d for d in file_deps if d not in completed_set]
+                if unoptimized_deps:
+                    st.warning(
+                        f"⚠️ `{active_file}` imports: {', '.join(f'`{d}`' for d in file_deps)}. "
+                        f"Tip: Consider completing {', '.join(f'`{d}`' for d in unoptimized_deps)} first so this file sees their updated signatures!"
+                    )
+                else:
+                    st.caption(f"🔗 Imported context automatically loaded from: {', '.join(f'`{d}`' for d in file_deps)}")
+
+            orig_code = st.session_state.proj_orig_code[active_file]
+            curr_code = working_tree[active_file]
+            lang_name, syntax_lang, _ = get_language_info(active_file)
+
+            with st.expander(f"📄 View Current Source: `{active_file}` ({lang_name})", expanded=False):
+                st.code(curr_code, language=syntax_lang)
+
+            file_goals = st.text_input(
+                f"Optional custom goals for `{active_file}`:",
+                key=f"goals_{active_file}",
+                placeholder="Leave blank for default security & performance optimization, or add specific instructions...",
+            )
+
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                if st.button(f"🔍 Step 1: Audit `{Path(active_file).name}`", use_container_width=True):
+                    with st.spinner(f"Auditing `{active_file}`..."):
+                        audits_map[active_file] = audit_code(active_file, curr_code)
+                        st.session_state.proj_results.pop(active_file, None)
+
+            with col_b2:
+                has_audit = active_file in audits_map
+                if st.button(
+                    f"⚡ Step 2: Optimize `{Path(active_file).name}` (With Neighbor Context)",
+                    disabled=not has_audit,
+                    use_container_width=True,
+                ):
+                    with st.status(f"Optimizing `{active_file}` with imported neighbor context...", expanded=True) as f_stat:
+                        context_goals = build_neighbor_context(
+                            target_rel_path=active_file,
+                            working_tree=working_tree,
+                            repo_map=st.session_state.proj_repo_map,
+                            extra_goals=file_goals,
+                            session_rules=st.session_state.get("proj_learned_rules", []),
+                        )
+                        opt_res = optimize_single_file(
+                            filename=Path(active_file).name,
+                            original_code=curr_code,
+                            audit_report=audits_map[active_file],
+                            extra_goals=context_goals,
+                            project_context_files=working_tree,
+                            target_rel_path=active_file,
+                            status_callback=lambda m: f_stat.write(m),
+                        )
+                        st.session_state.proj_results[active_file] = opt_res
+                        badge_txt = format_tier_badge(opt_res["approved"], opt_res.get("verification_tier", "none"))
+                        f_stat.update(
+                            label=badge_txt,
+                            state="complete" if opt_res["approved"] else "error",
+                        )
+
+            # Show Audit Report for active file
+            if active_file in audits_map:
+                st.divider()
+                st.subheader(f"📋 Audit & Limitations: `{active_file}`")
+                st.markdown(audits_map[active_file])
+
+            # Show Optimization Diff, Save & Advance Button, and Follow-Up Q&A
+            if active_file in st.session_state.proj_results:
+                res = st.session_state.proj_results[active_file]
+                tier = res.get("verification_tier", "none")
+                st.divider()
+                st.subheader(f"🧪 Results for `{active_file}` — {format_tier_badge(res['approved'], tier)}")
+
+                for log_line in res["logs"]:
+                    st.write(log_line)
+
+                t_diff, t_code, t_tests = st.tabs(["🔀 Unified Diff", "✅ Optimized Code", "🧪 Tests"])
+                with t_diff:
+                    st.code(res["diff"] or "No changes made.", language="diff")
+                with t_code:
+                    st.code(res["optimized_code"], language=syntax_lang)
+                with t_tests:
+                    if res["test_code"]:
+                        st.code(res["test_code"], language=syntax_lang)
+                    else:
+                        st.info(f"Verification Tier `{tier}` (`{lang_name}`).")
+
+                col_save, col_skip = st.columns(2)
+                with col_save:
+                    if st.button(
+                        "✅ Accept Changes & Advance to Next File",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        working_tree[active_file] = res["optimized_code"]
+                        completed_set.add(active_file)
+                        next_rem = [f for f in ordered_files if f not in completed_set]
+                        if next_rem:
+                            st.session_state.proj_active_file = next_rem[0]
+                        st.rerun()
+
+                with col_skip:
+                    if st.button("⏭️ Mark Completed Without Changes & Advance", use_container_width=True):
+                        completed_set.add(active_file)
+                        next_rem = [f for f in ordered_files if f not in completed_set]
+                        if next_rem:
+                            st.session_state.proj_active_file = next_rem[0]
+                        st.rerun()
+
+                # Follow-up Q&A or Tweaks for this file
+                st.divider()
+                st.subheader(f"💬 Ask or Apply Suggestions on `{Path(active_file).name}`")
+                st.caption("Suggestions and corrections automatically rewrite the code above and save to Session Memory for future files.")
+
+                qa_list = st.session_state.proj_qa.setdefault(active_file, [])
+                for qa in qa_list:
+                    with st.chat_message(qa["role"]):
+                        st.markdown(qa["content"])
+
+                with st.form(key=f"proj_qa_form_{active_file}", clear_on_submit=True):
+                    q_input = st.text_input(
+                        "Question or suggestion:",
+                        placeholder="e.g., 'Remove existsByMedicalLicenseNumber and only use methods in UserAccountRepository'",
+                    )
+                    col_f1, col_f2 = st.columns([2, 1])
+                    with col_f1:
+                        q_sub = st.form_submit_button("Send to Code Agent", type="primary", use_container_width=True)
+                    with col_f2:
+                        force_code_edit = st.checkbox("Force code rewrite", value=True)
+
+                if q_sub and q_input.strip():
+                    qa_list.append({"role": "user", "content": q_input})
+                    with st.status("Applying suggestion & re-verifying code...", expanded=True) as q_stat:
+                        neighbor_ctx = build_neighbor_context(
+                            target_rel_path=active_file,
+                            working_tree=working_tree,
+                            repo_map=st.session_state.proj_repo_map,
+                            extra_goals=q_input,
+                            session_rules=st.session_state.get("proj_learned_rules", []),
+                        )
+                        effective_msg = (
+                            f"Apply this code change: {q_input}"
+                            if force_code_edit and not q_input.strip().endswith("?")
+                            else q_input
+                        )
+                        outcome = handle_code_followup(
+                            filename=Path(active_file).name,
+                            original_code=orig_code,
+                            current_optimized_code=res["optimized_code"],
+                            audit_report=audits_map[active_file],
+                            user_message=effective_msg,
+                            extra_context=neighbor_ctx,
+                            status_callback=lambda m: q_stat.write(m),
+                        )
+                        if outcome["action"] == "answer":
+                            qa_list.append({"role": "assistant", "content": outcome["answer"]})
+                        else:
+                            st.session_state.proj_results[active_file] = outcome
+                            new_rule = f"[{Path(active_file).name}] {outcome['instruction']}"
+                            if new_rule not in st.session_state.proj_learned_rules:
+                                st.session_state.proj_learned_rules.append(new_rule)
+                            qa_list.append({
+                                "role": "assistant",
+                                "content": (
+                                    f"🔄 **Code Updated & Re-verified!**\n"
+                                    f"- **Applied Change:** {outcome['instruction']}\n"
+                                    f"- **Saved to Session Memory:** `{new_rule}` (will be enforced on all upcoming files)"
+                                ),
+                            })
+                    st.rerun()
+
+                # Show active learned rules visibly right below the chat too
+                if st.session_state.get("proj_learned_rules"):
+                    with st.container(border=True):
+                        st.markdown("**🧠 Active Rules Carried Forward to Future Files:**")
+                        for r_idx, rule_item in enumerate(st.session_state["proj_learned_rules"], start=1):
+                            st.markdown(f"{r_idx}. `{rule_item}`")
