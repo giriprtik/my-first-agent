@@ -86,6 +86,10 @@ SCANNERS: dict[str, ScannerSpec] = {
         "tsc", "TypeScript (tsc)", "TypeScript type errors (projects with a tsconfig.json)",
         "Node.js 18+, then: cd tools/eslint && npm ci", exts=frozenset({".ts", ".tsx"}), output="tsc-text",
         ok_exit=frozenset({0, 1, 2}), group="quality"),
+    "flow": ScannerSpec(
+        "flow", "Data flow (taint)", "User input followed across functions and files into SQL, shell, eval, "
+        "templates, file paths, URLs, redirects and HTML",
+        "pip install tree-sitter tree-sitter-language-pack", exts=PY | JAVA | JS_TS, output="inprocess"),
 }
 
 
@@ -107,11 +111,14 @@ class Finding:
     fingerprint: str = ""
     in_test: bool = False              # tests/fixtures: often deliberate fake secrets or unsafe calls
     also: tuple[str, ...] = ()         # other tools that flagged the same line and weakness
+    trace: tuple[str, ...] = ()        # data-flow path, one "file:line what" step per hop (flow findings)
+    verdict: str = ""                  # AI verification: "confirmed: …" / "false_positive: …" / "needs_context: …"
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["cwe"] = list(self.cwe)
         d["also"] = list(self.also)
+        d["trace"] = list(self.trace)
         return d
 
     @property
@@ -157,6 +164,9 @@ def find_tool(name: str) -> str | None:
     """Looks in SCANNER_BIN_DIR, tools/eslint (for eslint/tsc), next to the running Python, then on PATH.
 
     ESLint is only taken from tools/eslint: a global eslint would not have the plugins our config imports."""
+    if name == "flow":                                  # built in, needs only the tree-sitter packages
+        import flows
+        return "builtin" if flows.available() else None
     candidates = [p for p in os.environ.get("SCANNER_BIN_DIR", "").split(os.pathsep) if p]
     if name in ("eslint", "tsc"):
         if not shutil.which("node"):                   # the npm shims need Node.js on PATH
@@ -176,10 +186,26 @@ def available_scanners() -> dict[str, str | None]:
     return {name: find_tool(spec.name) for name, spec in SCANNERS.items()}
 
 
-def semgrep_configs() -> list[str]:
-    """Local rule folders from SEMGREP_RULES (os.pathsep-separated), else the registry packs."""
+_RULE_LANG = {"python": PY, "java": JAVA, "javascript": JS_TS, "typescript": JS_TS, "react": JS_TS}
+
+
+def semgrep_configs(exts_present: set[str] | None = None) -> list[str]:
+    """Local rule folders from SEMGREP_RULES (os.pathsep-separated), else the registry packs.
+
+    With exts_present, language packs/folders for languages the project doesn't contain are dropped: loading
+    rules is most of Semgrep's run time."""
     local = [p for p in os.environ.get("SEMGREP_RULES", "").split(os.pathsep) if p.strip()]
-    return local or list(DEFAULT_SEMGREP_CONFIGS)
+    configs = local or list(DEFAULT_SEMGREP_CONFIGS)
+    if exts_present is None:
+        return configs
+
+    def needed(cfg: str) -> bool:
+        parts = {x.lower() for x in re.split(r"[\\/]", cfg.replace("p/", ""))}
+        langs = [exts for name, exts in _RULE_LANG.items() if name in parts]
+        return not langs or any(exts & exts_present for exts in langs)
+
+    kept = [c for c in configs if needed(c)]
+    return kept or configs
 
 
 RUFF_RULES = "E4,E7,E9,F,B,UP,SIM,PERF,PIE,RUF,PL"
@@ -206,7 +232,8 @@ def build_command(tool: str, exe: str, out_file: str, root: Path | None = None) 
     if tool == "semgrep":
         cmd = [exe, "scan", "--sarif", "--output", out_file, "--metrics=off", "--disable-version-check",
                "--quiet", "--timeout", "30"]
-        for cfg in semgrep_configs():
+        exts = {p.suffix.lower() for p in root.rglob("*") if p.is_file()} if root is not None else None
+        for cfg in semgrep_configs(exts):
             cmd += ["--config", cfg]
         return cmd + ["."]
     if tool == "gitleaks":
@@ -278,8 +305,52 @@ def _skip_reason(tool: str, root: Path, exts_present: set[str]) -> str:
     return ""
 
 
+def flow_findings(flow_list) -> list[Finding]:
+    out = []
+    for fl in flow_list:
+        crossed = f" (crosses {fl.files_crossed} files)" if fl.files_crossed > 1 else ""
+        source = re.sub(r"^\S+ ", "", fl.source).replace(" (user input)", "").replace(" (request parameter)", "")
+        msg = f"User input ({source}) reaches a {fl.label} in {len(fl.trace) - 1} step(s){crossed}."
+        cwe_no = fl.cwe.split("-")[-1]
+        f = _make("flow", f"taint-{fl.kind}", fl.severity, "security", f"User input reaches {fl.label}", msg,
+                  fl.file, fl.line, cwe=(fl.cwe,), snippet=fl.snippet,
+                  help_url=f"https://cwe.mitre.org/data/definitions/{cwe_no}.html")
+        out.append(Finding(**{**f.__dict__, "trace": tuple(fl.trace),
+                              "fix_hint": FLOW_FIX_HINTS.get(fl.kind, "Validate or sanitize the input before it reaches the sink")}))
+    return out
+
+
+FLOW_FIX_HINTS = {
+    "sql": "Use a parameterized query (placeholders + bound values) instead of building SQL text",
+    "nosql": "Never build $where strings; cast ids to strings/ObjectIds and reject objects in query values",
+    "command": "Pass an argument list without a shell and validate the value against an allow-list",
+    "code": "Do not evaluate user input; parse it as data (JSON, ast.literal_eval) instead",
+    "template": "Render a fixed template and pass user input as a variable, never as template source",
+    "stored-template": "Escape or strip template syntax ({{ }}, {% %}) before storing user text in template files",
+    "deserialization": "Use a safe format (JSON) or a safe loader (yaml.safe_load); never unpickle user data",
+    "ssrf": "Allow-list hosts/schemes and block private and metadata IP ranges before fetching user-supplied URLs",
+    "path": "Resolve the path and check it stays inside the allowed folder (and use basename for file names)",
+    "redirect": "Only redirect to relative paths or an allow-list of hosts",
+    "xss": "Escape the value or use textContent / a sanitizer such as DOMPurify",
+    "xxe": "Disable external entities and DTDs in the XML parser (defusedxml in Python)",
+}
+
+
 def _run_one(tool: str, exe: str, root: Path, timeout: int) -> tuple[dict, list[Finding]]:
     spec = SCANNERS[tool]
+    if spec.output == "inprocess":
+        started = time.monotonic()
+        try:
+            import flows
+            found = flow_findings(flows.analyse_tree(root))
+        except Exception as e:  # missing grammars, parser crash: report, never break the scan
+            return {"status": "error", "detail": str(e)[:400], "seconds": round(time.monotonic() - started, 1),
+                    "count": 0}, []
+        cross = sum(1 for f in found if len({s.split(":")[0] for s in f.trace}) > 1)
+        info = {"status": "ok", "detail": "", "seconds": round(time.monotonic() - started, 1), "count": len(found)}
+        if cross:
+            info["note"] = f"{cross} path(s) cross files"
+        return info, found
     out_file = str(root.parent / f"{tool}.sarif")
     cmd = build_command(tool, exe, out_file, root)
     started = time.monotonic()
@@ -748,8 +819,13 @@ def merge_cross_tool(findings: list[Finding]) -> list[Finding]:
             twin = next((k for k in kept if k.file == f.file and k.line == f.line and k.tool != f.tool
                          and k.category == "security" and set(k.cwe) & set(f.cwe)), None)
             if twin is not None:
+                updates = {}
                 if f.tool not in twin.also:
-                    kept[kept.index(twin)] = Finding(**{**twin.__dict__, "also": twin.also + (f.tool,)})
+                    updates["also"] = twin.also + (f.tool,)
+                if f.trace and not twin.trace:          # keep the data-flow path when Semgrep wins the merge
+                    updates["trace"] = f.trace
+                if updates:
+                    kept[kept.index(twin)] = Finding(**{**twin.__dict__, **updates})
                 continue
         kept.append(f)
     return kept
@@ -798,6 +874,8 @@ def findings_prompt_block(findings: list[Finding], limit: int = 40) -> str:
             lines.append(f"   code: {f.snippet[:200]}")
         if f.fix_hint:
             lines.append(f"   hint: {f.fix_hint[:200]}")
+        if f.trace:
+            lines.append("   data flow: " + " → ".join(f.trace)[:600])
     if len(findings) > limit:
         lines.append(f"... and {len(findings) - limit} lower-priority findings not shown.")
     return "\n".join(lines)
@@ -809,6 +887,8 @@ def finding_goal(f: Finding) -> str:
     parts = [f"Fix {f.tool} finding {f.rule_id}{cwe} at {f.location}: {f.message}"]
     if f.fix_hint:
         parts.append(f"Suggested fix: {f.fix_hint}")
+    if f.trace:
+        parts.append("Data flow: " + " → ".join(f.trace))
     parts.append("Keep the public interface unchanged and add a test that fails on the vulnerable version.")
     return "\n".join(parts)
 
@@ -816,7 +896,9 @@ def finding_goal(f: Finding) -> str:
 def findings_table_rows(findings: list[Finding]) -> list[dict]:
     return [{"Severity": f"{SEVERITY_ICONS.get(f.severity, '')} {f.severity}", "Tool": f.tool,
              "Category": f.category, "File": f.file, "Line": f.line or None, "Rule": f.rule_id,
-             "CWE": ", ".join(f.cwe), "Also flagged by": ", ".join(f.also), "Test/vendored": f.in_test, "Message": f.message[:300], "Fix hint": f.fix_hint[:200],
+             "CWE": ", ".join(f.cwe), "Also flagged by": ", ".join(f.also),
+             "Data flow": (f"{len(f.trace)} steps · {len({s.split(':')[0] for s in f.trace})} file(s)" if f.trace else ""),
+             "AI verdict": f.verdict.split(":")[0].replace("_", " ") if f.verdict else "", "Test/vendored": f.in_test, "Message": f.message[:300], "Fix hint": f.fix_hint[:200],
              "Link": f.help_url or None}
             for f in findings]
 
@@ -852,7 +934,8 @@ BLOCKING_SEVERITIES = ("critical", "high", "medium")
 
 def default_must_fix(findings: list[Finding]) -> list[Finding]:
     """What the optimizer must make disappear unless the user says otherwise: real, urgent, non-test findings."""
-    return [f for f in findings if f.severity in ("critical", "high") and f.category != "quality" and not f.in_test]
+    return [f for f in findings if f.severity in ("critical", "high") and f.category != "quality" and not f.in_test
+            and not f.verdict.startswith("false_positive")]
 
 
 def _snip(f: Finding) -> str:
@@ -919,13 +1002,22 @@ def added_suppressions(original_code: str, new_code: str) -> int:
 
 
 def recheck_file(rel_path: str, new_code: str, before: list[Finding], must_fix: list[Finding] | None = None,
-                 timeout: int = DEFAULT_TIMEOUT_SEC, original_code: str = "") -> dict:
+                 timeout: int = DEFAULT_TIMEOUT_SEC, original_code: str = "",
+                 project_files: dict[str, str | bytes] | None = None) -> dict:
     """Re-runs the scanners that produced `before` on the rewritten file and compares.
 
     `status` is "ok", or "unavailable" when no relevant scanner could run (the check is then skipped, not failed)."""
     used = {f.tool for f in before} | {t for f in before for t in f.also}
     tools = sorted(used - {"osv-scanner", "tsc"} or {"semgrep", "gitleaks"})   # tsc needs the whole project
-    report = run_scanners({rel_path: new_code}, scanners=tools, timeout=timeout)
+    file_tools = [t for t in tools if t != "flow"]
+    report = run_scanners({rel_path: new_code}, scanners=file_tools, timeout=timeout) if file_tools else ScanReport()
+    if "flow" in tools:
+        # data flows cross files: re-run on the whole project with the new version swapped in
+        tree = dict(project_files or {})
+        tree[rel_path] = new_code
+        flow_rep = run_scanners(tree, scanners=["flow"], timeout=timeout)
+        report.tools.update(flow_rep.tools)
+        report.findings = merge_cross_tool(report.findings + flow_rep.findings)
     ran = [t for t, info in report.tools.items() if info["status"] == "ok"]
     if not ran:
         reasons = "; ".join(f"{t}: {i['status']}" for t, i in report.tools.items())

@@ -15,6 +15,7 @@ scanners missed (logic, authorization, second-order flows).
 | PMD 7 | Java | Error-prone code, resource leaks, threading, security rules | `brew install pmd` or GitHub release (Java 8+) |
 | ESLint 9 | JS/TS/React | XSS sinks, eval, hooks misuse, accessibility, risky TypeScript | Node.js 18+, then `cd tools/eslint && npm ci` |
 | tsc | TypeScript | Type errors (projects with a tsconfig.json) | same as ESLint |
+| Data flow (built in) | Python, JS/TS, Java | User input followed across functions **and files** into SQL, NoSQL, shell, eval, templates, file paths, URLs, redirects, HTML | `pip install tree-sitter tree-sitter-language-pack` (in requirements-scanners.txt) |
 
 Only the tools for the languages in the code run; the others are listed as "Not needed for this code".
 Categories: `security`, `secret`, `dependency` (security tools) and `quality` (Ruff, mypy, PMD, most ESLint rules, tsc).
@@ -55,6 +56,55 @@ How it works:
   - A scanner that crashes is never counted as "fixed". Its findings are listed as unchecked.
 - **Zip workbench.** The re-check is only active while the file is byte-for-byte what was scanned. After accepting
   changes, re-scan the project.
+
+## Data-flow analysis (Phase 4)
+`flows.py` is a lightweight interprocedural taint analysis, built on tree-sitter. It is not a full CodeQL.
+
+**How it works**
+1. **Parse.** Every Python / JS / TS / Java file is split into functions, including anonymous callbacks such as
+   Express handlers.
+2. **Track taint inside a function.** Statements are walked in order. A variable becomes tainted when it is assigned
+   from one of these, or from another tainted variable:
+   - **Python:** `request.args/form/json/…`, `input()`, `sys.argv`, and parameters of `@app.route` / FastAPI handlers.
+   - **JS/TS:** `req.body/query/params/…`, `location.*`, `document.cookie`, `event.data`.
+   - **Java:** parameters annotated `@RequestParam` / `@PathVariable` / `@RequestBody`, and `request.getParameter…`.
+
+   A value wrapped in a sanitizer (`int()`, `Number()`, `escape()`, `secure_filename()`, `DOMPurify.sanitize()`…)
+   stops being tainted.
+3. **Follow calls across files.** Calls are resolved by name: same file first, then imported files, then a unique
+   name anywhere in the project. Common names like `get` or `find` resolve only locally. A tainted argument taints
+   the callee's parameter, up to 6 hops. A callee that returns tainted data taints the caller's variable.
+4. **Report sinks.** A sink only counts when its *relevant* argument is tainted. For SQL that's the query text, so
+   `execute("… = ?", (name,))` is safe.
+
+**Rules for specific sinks**
+- **NoSQL:**
+  - A `$where` string, or a whole query object taken from the user, is high.
+  - A field value from `req.body` / `req.query` (could be `{"$ne": …}`) is medium.
+  - These only apply in MongoDB-style code; Sequelize/TypeORM objects are not reported.
+- **Stored template injection:** user input written to a file, in a module that renders templates.
+
+**What you see**
+- Each finding carries its **path** (source → calls → sink, `file:line` per step). It appears in the
+  *🧵 Data-flow paths* panel, in the auditor prompt and in "Fix a finding".
+- **🧠 Verify with AI:** the model reads the code around every step and marks each path confirmed / false positive /
+  needs context. False positives drop to `info` and leave the must-fix list.
+- **Re-check:** in the zip workbench, the Phase 2 re-check re-runs the data-flow analysis on the whole project with
+  the rewritten file swapped in. Fixing a controller or a repository is judged with both sides of the path present.
+
+**Limits**
+- Calls are resolved by name only, with no type information.
+- No tracking of fields or object properties, no aliasing, no async/event flows.
+- Framework magic (dependency injection, decorators that rewrite arguments) is not modelled.
+
+Treat results as strong candidates and use the AI verification. For full precision on open-source code, CodeQL is
+the next step up (its licence restricts use on private code without GitHub Advanced Security).
+
+**Benchmark:** pygoat 12 paths in 0.6 s, Juice Shop 38 paths in 5 s. New catches that Semgrep, Bandit and ESLint all
+missed:
+- Juice Shop: NoSQL `$where` injection in `showProductReviews.ts` and `trackOrder.ts`, NoSQL operator injection in
+  `updateProductReviews.ts`, SSRF via `fetch(url)` in `profileImageUrlUpload.ts`.
+- pygoat: the second-order template injection in `template_injection_lab`.
 
 ## Configuration (environment variables)
 | Variable | Effect |

@@ -2,7 +2,6 @@
 so they are unit-testable. Colours are semi-transparent so they read on Streamlit's light and dark themes."""
 import difflib
 import html
-import ipaddress
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
@@ -54,13 +53,32 @@ APP_CSS = """
 .jb-diff td.jb-add{background:rgba(22,163,74,.20)}
 .jb-diff td.jb-empty{background:rgba(128,128,128,.07)}
 .jb-diff tr.jb-gap td{text-align:center;opacity:.5;background:rgba(128,128,128,.08);padding:2px}
+.jb-findcount{font-size:.68rem;font-weight:700;border-radius:999px;padding:0 7px;white-space:nowrap}
+.jb-scanners{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;margin:4px 0 10px}
+.jb-scanner{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:8px 10px;background:rgba(128,128,128,.05)}
+.jb-scanner .jb-sc-top{display:flex;justify-content:space-between;gap:6px;font-weight:600;font-size:.84rem}
+.jb-scanner .jb-sc-detail{font-size:.72rem;opacity:.75;margin-top:3px;word-break:break-word}
+.jb-scanner.ok{border-color:rgba(22,163,74,.5)}
+.jb-scanner.missing{border-style:dashed;opacity:.85}
+.jb-scanner.error,.jb-scanner.timeout{border-color:rgba(220,38,38,.6);background:rgba(220,38,38,.08)}
+.jb-sc-extra{font-size:.74rem;opacity:.8;margin:-4px 0 8px;line-height:1.5}
+.jb-sc-extra code{font-size:.7rem}
+.jb-sev{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px}
+.jb-recheck{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin:4px 0 10px}
+.jb-recheck .jb-col{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:8px 10px}
+.jb-recheck .jb-col h5{margin:0 0 4px;font-size:.82rem}
+.jb-recheck .jb-col div{font-size:.74rem;line-height:1.35;margin:2px 0;word-break:break-word}
+.jb-recheck .good{border-color:rgba(22,163,74,.55);background:rgba(22,163,74,.07)}
+.jb-recheck .bad{border-color:rgba(220,38,38,.6);background:rgba(220,38,38,.07)}
+.jb-recheck .warn{border-color:rgba(217,119,6,.6);background:rgba(217,119,6,.07)}
+.jb-sev span{font-size:.75rem;font-weight:600;border-radius:999px;padding:2px 10px;border:1px solid currentColor}
 </style>
 """
 
 # ---------------------------------------------------------------- pipeline stepper
 
 _ICONS = {"pending": "○", "running": "◐", "passed": "✓", "failed": "✕", "skipped": "–"}
-_LOOP_STAGES = ("coder", "gate", "regression", "verify", "review")
+_LOOP_STAGES = ("coder", "gate", "regression", "verify", "rescan", "review")
 
 
 def new_stepper_state() -> dict:
@@ -132,24 +150,8 @@ def side_by_side_diff_html(original: str, updated: str, from_label: str = "Origi
 # ---------------------------------------------------------------- source cards
 
 def _safe_http_url(url: str) -> str | None:
-    trimmed = (url or "").strip()
-    parsed = urlparse(trimmed)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return None
-    if parsed.username or parsed.password:
-        return None
-    host = parsed.hostname
-    if not host:
-        return None
-    if host.lower() in ("localhost", "127.0.0.1", "::1", "169.254.169.254", "metadata.google.internal"):
-        return None
-    try:
-        ip = ipaddress.ip_address(host)
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-            return None
-    except ValueError:
-        pass
-    return trimmed
+    parsed = urlparse((url or "").strip())
+    return url.strip() if parsed.scheme in ("http", "https") and parsed.netloc else None
 
 
 def source_cards_html(sources: list[dict]) -> str:
@@ -192,8 +194,8 @@ def file_status(path: str, completed: set, audits: dict, results: dict, working_
 
 
 def _badge(status: str) -> str:
-    label, color = FILE_STATUSES.get(status, ("Pending", "#6b7280"))
-    return f'<span class="jb-badge" style="color:{html.escape(color, quote=True)}">{html.escape(label)}</span>'
+    label, color = FILE_STATUSES[status]
+    return f'<span class="jb-badge" style="color:{color}">{html.escape(label)}</span>'
 
 
 def status_legend_html(counts: Counter) -> str:
@@ -204,14 +206,15 @@ def status_legend_html(counts: Counter) -> str:
 
 
 def file_tree_html(ordered_files: list[str], statuses: dict[str, str], dep_map: dict[str, list[str]],
-                   active: str | None = None) -> str:
-    """Files grouped by folder, each with its position in dependency order, status badge and local imports."""
+                   active: str | None = None, finding_counts: dict[str, tuple[int, str]] | None = None) -> str:
+    """Files grouped by folder, each with its position in dependency order, status badge and local imports.
+
+    finding_counts maps a path to (number of scanner findings, worst severity) and adds a coloured counter."""
+    finding_counts = finding_counts or {}
     position = {path: i for i, path in enumerate(ordered_files, start=1)}
     folders: dict[str, list[str]] = defaultdict(list)
     for path in ordered_files:
-        norm_path = str(path).replace("\\", "/")
-        parent_dir = str(PurePosixPath(norm_path).parent)
-        folders[parent_dir].append(path)
+        folders[str(PurePosixPath(path).parent)].append(path)
 
     rows = ['<div class="jb-tree">']
     for folder in sorted(folders, key=lambda f: min(position[p] for p in folders[f])):
@@ -221,13 +224,105 @@ def file_tree_html(ordered_files: list[str], statuses: dict[str, str], dep_map: 
             dep_txt = f'<span class="jb-deps">← {html.escape(", ".join(deps))}</span>' if deps else ""
             weight = "font-weight:700;" if path == active else ""
             pointer = " ◀" if path == active else ""
+            count_txt = ""
+            if finding_counts.get(path):
+                n, worst = finding_counts[path]
+                color = SEVERITY_COLORS.get(worst, "#6b7280")
+                count_txt = (f'<span class="jb-findcount" style="color:{color};border:1px solid {color}" '
+                             f'title="{n} scanner finding(s), worst: {html.escape(worst)}">🛡 {n}</span>')
             rows.append(
                 f'<div class="jb-file"><span class="jb-idx">#{position[path]}</span>'
                 f'{_badge(statuses.get(path, "pending"))}'
-                f'<span class="jb-name" style="{weight}">{html.escape(Path(path).name)}{pointer}</span>{dep_txt}</div>'
+                f'<span class="jb-name" style="{weight}">{html.escape(Path(path).name)}{pointer}</span>{count_txt}{dep_txt}</div>'
             )
     rows.append("</div>")
     return "".join(rows)
+
+
+# ---------------------------------------------------------------- security scanners
+
+SEVERITY_COLORS = {"critical": "#dc2626", "high": "#ea580c", "medium": "#ca8a04", "low": "#2563eb", "info": "#6b7280"}
+_SCANNER_STATE = {"ok": "✓ ran", "missing": "not installed", "error": "✕ failed", "timeout": "⏱ timed out"}
+
+
+def scanner_status_html(tools: dict[str, dict], labels: dict[str, str] | None = None) -> str:
+    """One card per scanner that ran (or failed); tools that were not needed or not installed go on one line each."""
+    labels = labels or {}
+    cards, missing, skipped = [], [], []
+    for name, info in tools.items():
+        status = info.get("status", "error")
+        label = html.escape(labels.get(name, name))
+        if status == "missing":
+            missing.append(f"<b>{label}</b> <code>{html.escape(info.get('detail', ''))}</code>")
+            continue
+        if status == "skipped":
+            skipped.append(f"{label} ({html.escape(info.get('detail', ''))})")
+            continue
+        detail = (f"{info.get('count', 0)} finding(s) in {info.get('seconds', 0)}s" if status == "ok"
+                  else info.get("detail", "") or status)
+        if info.get("note"):
+            detail += f" · {info['note']}"
+        cards.append(
+            f'<div class="jb-scanner {html.escape(status)}"><div class="jb-sc-top">'
+            f'<span>{label}</span><span>{html.escape(_SCANNER_STATE.get(status, status))}</span></div>'
+            f'<div class="jb-sc-detail">{html.escape(detail[:300])}</div></div>'
+        )
+    out = f'<div class="jb-scanners">{"".join(cards)}</div>' if cards else ""
+    if missing:
+        out += '<div class="jb-sc-extra">Not installed: ' + " · ".join(missing) + "</div>"
+    if skipped:
+        out += '<div class="jb-sc-extra">Not needed for this code: ' + ", ".join(skipped) + "</div>"
+    return out
+
+
+def severity_summary_html(counts: dict[str, int]) -> str:
+    chips = [f'<span style="color:{SEVERITY_COLORS[s]}">{s.capitalize()} {counts.get(s, 0)}</span>'
+             for s in SEVERITY_COLORS if counts.get(s)]
+    return f'<div class="jb-sev">{"".join(chips) or "<span>No findings</span>"}</div>'
+
+
+def finding_counts_by_file(findings) -> dict[str, tuple[int, str]]:
+    """{path: (count, worst severity)} for the file tree."""
+    order = list(SEVERITY_COLORS)
+    out: dict[str, tuple[int, str]] = {}
+    for f in findings:
+        n, worst = out.get(f.file, (0, "info"))
+        if order.index(f.severity) < order.index(worst):
+            worst = f.severity
+        out[f.file] = (n + 1, worst)
+    return out
+
+
+def recheck_html(check: dict | None) -> str:
+    """Resolved / still present / new findings after the optimizer's scanner re-check."""
+    if not check:
+        return ""
+    if check.get("status") != "ok":
+        return (f'<div class="jb-recheck"><div class="jb-col"><h5>🛡 Scanner re-check skipped</h5>'
+                f'<div>{html.escape(str(check.get("detail", ""))[:300])}</div></div></div>')
+
+    def items(findings, empty):
+        rows = [f'<div><b>{html.escape(f.severity)}</b> · {html.escape(f.rule_id.rsplit(".", 1)[-1])}'
+                f'{" · line " + str(f.line) if f.line else ""}</div>' for f in findings[:12]]
+        if len(findings) > 12:
+            rows.append(f"<div>… and {len(findings) - 12} more</div>")
+        return "".join(rows) or f'<div style="opacity:.6">{empty}</div>'
+
+    remaining, new = check["remaining"], check["introduced"]
+    other = [f for f in check["still_present"] if f not in remaining]
+    cols = [
+        ("good", f"✓ Resolved ({len(check['resolved'])})", items(check["resolved"], "None")),
+        ("bad" if remaining else "good", f"Must-fix still present ({len(remaining)}/{check['must_fix_count']})",
+         items(remaining, "None — all must-fix findings are gone")),
+        ("bad" if check["blocking_introduced"] else ("warn" if new else "good"), f"New findings ({len(new)})",
+         items(new, "None introduced")),
+    ]
+    if other:
+        cols.append(("warn", f"Not required, still present ({len(other)})", items(other, "")))
+    if check.get("suppressions_added"):
+        cols.append(("bad", "Suppression comments added", f"<div>{check['suppressions_added']} — not allowed</div>"))
+    return '<div class="jb-recheck">' + "".join(
+        f'<div class="jb-col {cls}"><h5>{html.escape(title)}</h5>{body}</div>' for cls, title, body in cols) + "</div>"
 
 
 # ---------------------------------------------------------------- telemetry
@@ -235,56 +330,21 @@ def file_tree_html(ordered_files: list[str], statuses: dict[str, str], dep_map: 
 def summarize_metrics(entries: list[dict]) -> dict:
     """Splits telemetry into model requests, tool calls and errors.
     A 'request' is a successful model call (lines without an error that are not tool calls)."""
-    requests = []
-    tools = []
-    errors = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if "error" in e:
-            errors.append(e)
-        elif e.get("source") == "tool":
-            tools.append(e)
-        else:
-            requests.append(e)
-
-    req_latencies = [float(e["latency_sec"]) for e in requests if isinstance(e.get("latency_sec"), (int, float)) and e.get("latency_sec") is not None]
-    total_latency = sum(req_latencies)
-    avg_latency = (total_latency / len(req_latencies)) if req_latencies else 0.0
-
-    total_tokens = sum(int(e["total_tokens"]) for e in requests if isinstance(e.get("total_tokens"), (int, float)) and e.get("total_tokens") is not None)
-
-    by_source_counter = Counter()
-    for e in requests:
-        by_source_counter[e.get("source") or "unlabelled"] += 1
-
-    tool_failures = sum(1 for e in tools if e.get("ok") is False)
-
-    tools_by_name_counter = Counter()
-    for e in tools:
-        tools_by_name_counter[e.get("tool") or "?"] += 1
-
-    errors_by_model_counter = Counter()
-    for e in errors:
-        errors_by_model_counter[e.get("model") or "?"] += 1
-
-    last_error = errors[-1].get("error", "") if errors else ""
-
-    token_series = [
-        {"timestamp": e["timestamp"], "source": e.get("source") or "unlabelled", "tokens": int(e["total_tokens"])}
-        for e in requests
-        if e.get("timestamp") and isinstance(e.get("total_tokens"), (int, float)) and e.get("total_tokens") is not None
-    ]
-
+    requests = [e for e in entries if "error" not in e and e.get("source") != "tool"]
+    tools = [e for e in entries if e.get("source") == "tool"]
+    errors = [e for e in entries if "error" in e]
     return {
         "requests": len(requests),
-        "avg_latency": avg_latency,
-        "total_tokens": total_tokens,
-        "by_source": dict(by_source_counter),
+        "avg_latency": (sum(e.get("latency_sec") or 0 for e in requests) / len(requests)) if requests else 0.0,
+        "total_tokens": sum(e.get("total_tokens") or 0 for e in requests),
+        "by_source": dict(Counter(e.get("source") or "unlabelled" for e in requests)),
         "tool_calls": len(tools),
-        "tool_failures": tool_failures,
-        "tools_by_name": dict(tools_by_name_counter),
-        "errors_by_model": dict(errors_by_model_counter),
-        "last_error": last_error,
-        "token_series": token_series,
+        "tool_failures": sum(1 for e in tools if e.get("ok") is False),
+        "tools_by_name": dict(Counter(e.get("tool") or "?" for e in tools)),
+        "errors_by_model": dict(Counter(e.get("model") or "?" for e in errors)),
+        "last_error": errors[-1].get("error", "") if errors else "",
+        "token_series": [
+            {"timestamp": e["timestamp"], "source": e.get("source") or "unlabelled", "tokens": e.get("total_tokens") or 0}
+            for e in requests if e.get("timestamp")
+        ],
     }

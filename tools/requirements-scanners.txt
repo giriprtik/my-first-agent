@@ -6,3 +6,6 @@ ruff==0.17.5
 mypy==2.4.1
 # Non-Python tools: gitleaks, osv-scanner (brew or GitHub releases), PMD 7.29 (needs Java),
 # and ESLint/TypeScript: Node.js 18+, then `cd tools/eslint && npm ci`.
+# Data-flow (taint) analysis, built in (flows.py). Grammars (~30 MB) download once on first use.
+tree-sitter==0.26.1
+tree-sitter-language-pack==1.25.2

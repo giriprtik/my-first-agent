@@ -101,8 +101,9 @@ class ProgressEvents(unittest.TestCase):
         for stage, state, _ in events:
             final[stage] = state
         stage_ids = [sid for sid, _ in fo.PIPELINE_STAGES]
-        self.assertEqual({k: v for k, v in final.items() if k in stage_ids},
-                         {sid: "passed" for sid in stage_ids})
+        expected = {sid: "passed" for sid in stage_ids}
+        expected["rescan"] = "skipped"   # no scanner findings in this run, so the re-check is skipped by design
+        self.assertEqual({k: v for k, v in final.items() if k in stage_ids}, expected)
         self.assertEqual(final["iteration"], "running")
         self.assertTrue(res["approved"])
 

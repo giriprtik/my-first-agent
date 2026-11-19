@@ -8,3 +8,13 @@ workspace_project/
 agent_outputs/
 agent_metrics.jsonl
 .DS_Store
+tools/eslint/node_modules/
+.chat_history.json
+.backups/
+agent_outputs/
+.mypy_cache/
+.ruff_cache/.env
+.env
+
+*.bak*
+*.patch

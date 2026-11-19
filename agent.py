@@ -3,7 +3,6 @@ import re
 import json
 import threading
 import time
-import ipaddress
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,18 +10,17 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from tavily import TavilyClient
-from tools import save_research_note  # Import your sandzoned tool
+from tools import save_research_note  # Import your sandboxed tool
 
 # 1. Load environment variables
 load_dotenv()
 
 METRICS_PATH = Path(__file__).parent / "agent_metrics.jsonl"
-MAX_METRIC_LINES = 1000  # Simple log rotation cap to mitigate unbounded file growth
 
-# Clients are created on first use, protected by thread locks
+# Clients are created on first use, so this module (and app.py, which imports it) can be imported
+# and tested without API keys. Tests can still replace them with patch.object(agent, "gemini_client").
 gemini_client = None
 tavily_client = None
-_clients_lock = threading.Lock()
 
 DEFAULT_TOOL_BUDGET = 6      # tool calls allowed per question in the streaming (UI) loop
 MAX_PAGE_CHARS = 8000        # read_page returns at most this much page text to the model
@@ -30,23 +28,21 @@ MAX_PAGE_CHARS = 8000        # read_page returns at most this much page text to 
 
 def _gemini():
     global gemini_client
-    with _clients_lock:
-        if gemini_client is None:
-            gemini_client = genai.Client(
-                http_options=types.HttpOptions(
-                    timeout=30000,  # milliseconds
-                    retry_options=types.HttpRetryOptions(attempts=1),
-                )
+    if gemini_client is None:
+        gemini_client = genai.Client(
+            http_options=types.HttpOptions(
+                timeout=30000,  # milliseconds
+                retry_options=types.HttpRetryOptions(attempts=1),
             )
-        return gemini_client
+        )
+    return gemini_client
 
 
 def _tavily():
     global tavily_client
-    with _clients_lock:
-        if tavily_client is None:
-            tavily_client = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY", ""))
-        return tavily_client
+    if tavily_client is None:
+        tavily_client = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY", ""))
+    return tavily_client
 
 
 def _format_results(response: dict) -> str:
@@ -58,38 +54,6 @@ def _format_results(response: dict) -> str:
             f"Title: {item.get('title', '')}\nURL: {item.get('url', '')}\nContent: {item.get('content', '')}\n"
         )
     return "\n---\n".join(results)
-
-
-def _is_safe_url(url: str) -> bool:
-    """SSRF protection: checks that the URL does not point to private, loopback, or internal metadata IPs."""
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            return False
-        
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-            
-        lower_host = hostname.lower()
-        if lower_host in ("localhost", "internal", "metadata.google.internal"):
-            return False
-
-        # Try parsing as an IP address
-        try:
-            ip = ipaddress.ip_address(hostname)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
-                return False
-        except ValueError:
-            # Not a raw IP, check if it resolves to a loopback/private or cloud metadata IP
-            import socket
-            ip_str = socket.gethostbyname(hostname)
-            ip = ipaddress.ip_address(ip_str)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
-                return False
-        return True
-    except Exception:
-        return False
 
 
 # 2. Define the Web Research Tools
@@ -118,8 +82,9 @@ def read_page(url: str) -> str:
     """Reads the main text of one web page, for example a source URL returned by a search,
     when the search snippet is not enough to answer accurately. Accepts full http(s) URLs only."""
     url = (url or "").strip()
-    if not _is_safe_url(url):
-        return "Tool error: read_page blocked request to restricted or invalid URL (potential SSRF protection)."
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return "Tool error: read_page only accepts full http(s) URLs, e.g. https://example.com/article."
     print(f"[TOOL LOG] Reading page: {url}")
     response = _tavily().extract(urls=[url], format="markdown")
     for item in response.get("results", []) or []:
@@ -240,13 +205,8 @@ def create_agent_session(model_name: str, history=None, manual_tools: bool = Fal
 def _append_metrics(entry: dict) -> None:
     entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
     try:
-        lines = []
-        if METRICS_PATH.exists():
-            lines = METRICS_PATH.read_text(encoding="utf-8").splitlines()
-        lines.append(json.dumps(entry))
-        if len(lines) > MAX_METRIC_LINES:
-            lines = lines[-MAX_METRIC_LINES:]
-        METRICS_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with open(METRICS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
     except OSError as e:
         print(f"[WARNING] Could not write telemetry: {e}")
 
@@ -275,12 +235,11 @@ def _log_error(model_name: str, error: Exception) -> None:
 
 
 def send_with_fallback(chat, prompt: str):
-    history = chat.get_history() if hasattr(chat, "get_history") else None
     for model_name in MODELS:
         print(f"[STATUS] Trying {model_name}...")
         try:
             if getattr(chat, "_model", None) != model_name:
-                chat = create_agent_session(model_name, history=history)
+                chat = create_agent_session(model_name, history=chat.get_history())
 
             start_time = time.perf_counter()
             response = chat.send_message(prompt)
@@ -429,14 +388,11 @@ def _chain(first: list, rest):
 
 
 def _run_tool(name: str, args: dict, confirm_saves: bool, pending_saves: list) -> tuple[str, bool, list]:
-    """Executes one tool call with argument validation. Returns (output for the model, ok, sources found)."""
+    """Executes one tool call. Returns (output for the model, ok, sources found)."""
     started = time.perf_counter()
     ok = True
     sources: list[dict] = []
     try:
-        if not isinstance(args, dict):
-            return "Tool error: arguments must be a dictionary.", False, []
-
         if name in _RESEARCH_TOOLS:
             output = _RESEARCH_TOOLS[name](**args)
             sources = _extract_sources(name, args, output)

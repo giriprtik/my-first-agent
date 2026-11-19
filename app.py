@@ -1,9 +1,10 @@
+import fnmatch
 import hashlib
 import json
 import shutil
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import streamlit as st
 
@@ -12,9 +13,12 @@ from chat_store import clear_conversation, load_conversation, save_conversation
 from file_optimizer import (
     audit_code,
     optimize_single_file,
+    GeminiQuotaError,
     extract_public_interface,
     get_language_info,
     handle_code_followup,
+    model_cooldowns,
+    verify_flows,
 )
 from project_optimizer import (
     parse_zip_in_memory,
@@ -22,13 +26,19 @@ from project_optimizer import (
     build_neighbor_context,
     package_overlay_zip,
     check_cross_file_consistency,
+    scannable_files,
 )
+from scanners import SCANNERS, SEVERITIES, ScanReport, default_must_fix, finding_goal, findings_table_rows, run_scanners, to_sarif
 from tools import save_research_note
 from ui_components import (
     APP_CSS,
     apply_progress,
     file_status,
     file_tree_html,
+    finding_counts_by_file,
+    recheck_html,
+    scanner_status_html,
+    severity_summary_html,
     new_stepper_state,
     side_by_side_diff_html,
     source_cards_html,
@@ -41,7 +51,7 @@ from ui_components import (
 st.set_page_config(page_title="AI Agent & Universal Code Optimizer", page_icon="🤖", layout="wide")
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
-PROJECT_ROOT = Path(__file__).parent.resolve()
+PROJECT_ROOT = Path(__file__).parent
 OUTPUTS_DIR = PROJECT_ROOT / "agent_outputs"
 METRICS_FILE = PROJECT_ROOT / "agent_metrics.jsonl"
 BACKUP_DIR = PROJECT_ROOT / ".backups"
@@ -53,7 +63,7 @@ PROJECT_STATE_KEYS = (
     "last_zip_name", "last_zip_fingerprint", "proj_all_files", "proj_orig_code", "proj_working_tree",
     "proj_ordered_files", "proj_dep_map", "proj_repo_map", "proj_audits", "proj_results", "proj_completed",
     "proj_qa", "proj_learned_rules", "proj_active_file", "proj_selected_scope", "proj_scope_multiselect",
-    "proj_consistency",
+    "proj_consistency", "proj_scan", "proj_scope_skip_folders", "proj_scope_glob", "proj_scope_findings_only",
 )
 
 TOOL_LABELS = {
@@ -64,18 +74,33 @@ TOOL_LABELS = {
 }
 
 
-@st.cache_data(show_spinner=False)
-def load_metrics(path: str | Path) -> list[dict]:
-    """Reads telemetry JSONL efficiently, skipping blank, torn or non-object lines instead of crashing."""
-    p = Path(path)
-    if not p.exists():
+def filter_scope(files: list[str], skip_folders: list[str], patterns_txt: str, scan=None) -> list[str]:
+    """Files left in the optimization queue, in dependency order."""
+    skip = [f.rstrip("/") for f in skip_folders or [] if f not in ("", ".")]
+    if "." in (skip_folders or []):
+        skip.append("")                                     # the project root folder itself
+    patterns = [p.strip() for p in (patterns_txt or "").split(",") if p.strip()]
+    with_findings = set(scan.counts_by_file()) if scan is not None else None
+    out = []
+    for path in files:
+        parent = str(PurePosixPath(path).parent)
+        if any((parent == f) or (f and parent.startswith(f + "/")) or (f == "" and parent == ".") for f in skip):
+            continue
+        if patterns and not any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(PurePosixPath(path).name, p)
+                                for p in patterns):
+            continue
+        if with_findings is not None and path not in with_findings:
+            continue
+        out.append(path)
+    return out
+
+
+def load_metrics(path: Path, max_lines: int = 5000) -> list[dict]:
+    """Reads the newest telemetry JSONL lines, skipping blank, torn or non-object lines instead of crashing."""
+    if not path.exists():
         return []
     entries = []
-    try:
-        content = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return []
-    for line in content.splitlines():
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]:
         if not line.strip():
             continue
         try:
@@ -87,7 +112,6 @@ def load_metrics(path: str | Path) -> list[dict]:
     return entries
 
 
-@st.cache_data(show_spinner=False)
 def zip_fingerprint(data: bytes) -> str:
     """Identifies an upload by content, so re-uploading an edited project with the same name is re-parsed."""
     return hashlib.sha256(data).hexdigest()
@@ -152,6 +176,23 @@ def render_results_tabs(res: dict, original: str, syntax_lang: str, lang_name: s
             st.info(f"Verification Tier `{res.get('verification_tier', 'none')}` (`{lang_name}`): no standalone unit tests.")
 
 
+def show_ai_error(e: Exception) -> None:
+    if isinstance(e, GeminiQuotaError):
+        st.error(f"⏳ {e}")
+    else:
+        st.error(f"⚠️ The AI call failed: {e}\n\nYour project, scan and earlier results are kept — try again in a moment.")
+
+
+def call_ai(fn, *args, **kwargs):
+    """Runs a Gemini-backed step; on quota or API failure shows a readable error and stops this run cleanly
+    (no traceback, session state untouched) instead of crashing the page."""
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as e:          # GeminiQuotaError is a RuntimeError
+        show_ai_error(e)
+        st.stop()
+
+
 def run_with_stepper(run, title: str) -> dict:
     """Runs an optimizer call with a live pipeline stepper plus a collapsible log; returns its result."""
     stepper = st.empty()
@@ -162,7 +203,13 @@ def run_with_stepper(run, title: str) -> dict:
             apply_progress(state, stage, status, detail)
             html_block_into(stepper, stepper_html(state))
 
-        result = run(lambda msg: log_box.write(msg), on_progress)
+        try:
+            result = run(lambda msg: log_box.write(msg), on_progress)
+        except RuntimeError as e:
+            log_box.update(label="⏳ Stopped: AI quota" if isinstance(e, GeminiQuotaError) else "⚠️ Stopped: AI call failed",
+                           state="error")
+            show_ai_error(e)
+            st.stop()
         if result.get("action") == "answer":
             log_box.update(label="✅ Answered", state="complete")
         else:
@@ -176,6 +223,112 @@ def run_with_stepper(run, title: str) -> dict:
 
 def html_block_into(placeholder, markup: str) -> None:
     placeholder.html(markup)
+
+
+def apply_pending_goal(goals_key: str) -> None:
+    """A widget's value can only be changed before it is drawn, so 'fix this finding' queues the text here."""
+    pending = st.session_state.pop(f"_pending_{goals_key}", None)
+    if pending is not None:
+        st.session_state[goals_key] = pending
+
+
+def queue_goal(goals_key: str, text: str) -> None:
+    current = (st.session_state.get(goals_key) or "").strip()
+    if text not in current:
+        st.session_state[f"_pending_{goals_key}"] = f"{current}\n\n{text}".strip()
+
+
+def render_flow_paths(findings: list, key: str) -> None:
+    """Each data-flow path as a numbered list of steps (source → calls → sink), most severe first."""
+    flows_shown = [f for f in findings if f.trace][:30]
+    if not flows_shown:
+        return
+    with st.expander(f"🧵 Data-flow paths ({len([f for f in findings if f.trace])})", expanded=False):
+        for f in flows_shown:
+            verdict = f" — 🧠 {f.verdict}" if f.verdict else ""
+            st.markdown(f"**{f.severity.upper()} · {f.title}** at `{f.location}`{verdict}")
+            st.code("\n".join(f"{n}. {step}" for n, step in enumerate(f.trace, 1)), language="text")
+
+
+def render_scan_report(report, key: str, goals_key: str | None = None, show_file_filter: bool = True,
+                       title: str = "🛡️ Code scan", verify_files: dict | None = None) -> None:
+    """Scanner cards, severity chips, a filterable findings table, data-flow paths, AI verification of the
+    paths, SARIF export and 'fix this finding'. verify_files enables the AI verification button."""
+    st.markdown(f"**{title}** — {report.file_count} file(s) scanned")
+    html_block(scanner_status_html(report.tools, {k: v.label for k, v in SCANNERS.items()}))
+    findings = report.findings
+    if not findings:
+        if any(t["status"] == "ok" for t in report.tools.values()):
+            st.success("No findings from the scanners that ran.")
+        return
+    html_block(severity_summary_html(report.counts_by_severity()))
+
+    cols = st.columns(3 if show_file_filter else 2)
+    severities = cols[0].multiselect("Severity", SEVERITIES, default=[s for s in SEVERITIES if s != "info"],
+                                     key=f"{key}_sev")
+    categories = sorted({f.category for f in findings})
+    picked_cats = cols[1].multiselect("Category", categories, default=categories, key=f"{key}_cat")
+    file_choice = "All files"
+    if show_file_filter:
+        files = ["All files"] + sorted({f.file for f in findings})
+        file_choice = cols[2].selectbox("File", files, key=f"{key}_file")
+    test_count = sum(f.in_test for f in findings)
+    include_tests = test_count == len(findings) or st.toggle(
+        f"Include {test_count} finding(s) in test or vendored code", value=False, key=f"{key}_tests",
+        help="Tests, fixtures and copied-in libraries (vendor/, *.min.js, assets/*.js) often contain deliberate fake secrets, unsafe calls or foreign code style.") if test_count else True
+    shown = [f for f in findings if f.severity in severities and f.category in picked_cats
+             and (file_choice == "All files" or f.file == file_choice) and (include_tests or not f.in_test)]
+
+    st.dataframe(
+        findings_table_rows(shown), width="stretch", hide_index=True,
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="docs"),
+                       "Line": st.column_config.NumberColumn("Line", format="%d")},
+    )
+    render_flow_paths(shown, key)
+    unverified = [f for f in findings if f.trace and not f.verdict]
+    if verify_files is not None and unverified:
+        if st.button(f"🧠 Verify {min(len(unverified), 15)} data-flow path(s) with AI", key=f"{key}_verify",
+                     help="The model reads the code at every step and marks each path confirmed, false positive "
+                          "or needs context. False positives drop to 'info' and leave the must-fix list."):
+            with st.spinner("Verifying data-flow paths..."):
+                report.findings = call_ai(verify_flows, report.findings, verify_files)
+            st.rerun()
+    col_fix, col_export = st.columns([3, 1])
+    with col_fix:
+        if goals_key and shown:
+            labels = [f"{f.severity.upper()} · {f.location} · {f.rule_id}" for f in shown]
+            idx = st.selectbox("Fix a finding", range(len(shown)), format_func=lambda i: labels[i], key=f"{key}_pick")
+            if shown[idx].trace:
+                st.caption("Data flow: " + " → ".join(shown[idx].trace))
+            if st.button("🛠️ Add to optimization goals", key=f"{key}_fix", width="stretch"):
+                queue_goal(goals_key, finding_goal(shown[idx]))
+                st.rerun()
+    with col_export:
+        st.download_button("⬇️ SARIF", data=lambda fs=list(findings): json.dumps(to_sarif(fs), indent=2),
+                           file_name=f"{key}.sarif", on_click="ignore",
+                           mime="application/json", key=f"{key}_sarif", width="stretch",
+                           help="Merged findings as SARIF 2.1, for GitHub code scanning or your IDE")
+
+
+def must_fix_selector(findings: list, key: str) -> None:
+    """Which findings the optimizer must make disappear; the scanners re-check every candidate."""
+    if not findings:
+        return
+    labels = [f"{f.severity.upper()} · {f.location} · {f.rule_id.rsplit('.', 1)[-1]}" + (" · test" if f.in_test else "")
+              for f in findings]
+    default = [i for i, f in enumerate(findings) if f in default_must_fix(findings)]
+    st.multiselect(
+        "🎯 Must be gone after optimization (re-checked by the scanners)", range(len(findings)), default=default,
+        format_func=lambda i: labels[i], key=key,
+        help="Defaults to high/critical findings outside test code. Remove any the audit triaged as false positives. "
+             "Any NEW medium+ finding also sends the code back to the Coder.")
+
+
+def selected_must_fix(findings: list, key: str) -> list:
+    chosen = st.session_state.get(key)
+    if chosen is None:
+        return default_must_fix(findings)
+    return [findings[i] for i in chosen if i < len(findings)]
 
 
 def persist_chat() -> None:
@@ -225,6 +378,14 @@ with st.sidebar:
     else:
         st.caption("No metrics logged yet.")
 
+    cooling = model_cooldowns()
+    if cooling:
+        lines = []
+        for model, info in sorted(cooling.items(), key=lambda kv: kv[1]["until"]):
+            wait = max(0, int(info["until"] - datetime.now().timestamp()))
+            back = f"{wait // 3600}h{(wait % 3600) // 60:02d}m" if wait >= 3600 else f"{max(1, wait // 60)}m"
+            lines.append(f"`{model}` — {info['reason']}, back in {back}")
+        st.warning("⏳ Optimizer models paused:\n\n" + "\n\n".join(lines))
     status = cached_model_status()
     if status["unavailable"]:
         st.caption("⏭️ Skipped models the API doesn't serve: " + ", ".join(status["unavailable"]))
@@ -240,7 +401,7 @@ with st.sidebar:
     else:
         st.caption("No saved notes yet.")
 
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
+    if st.button("🗑️ Clear Chat History", width="stretch"):
         clear_conversation(CHAT_FILE)
         st.session_state.messages = []
         st.session_state.pending_saves = []
@@ -292,7 +453,7 @@ with tab_chat:
             with st.expander("Preview", expanded=False):
                 st.markdown(pending["content"])
             col_yes, col_no = st.columns(2)
-            if col_yes.button("Save note", key=f"save_note_{idx}", type="primary", use_container_width=True):
+            if col_yes.button("Save note", key=f"save_note_{idx}", type="primary", width="stretch"):
                 try:
                     outcome = save_research_note(pending["filename"], pending["content"])
                 except ValueError as e:
@@ -302,7 +463,7 @@ with tab_chat:
                 st.session_state.pending_saves.pop(idx)
                 persist_chat()
                 st.rerun()
-            if col_no.button("Discard", key=f"discard_note_{idx}", use_container_width=True):
+            if col_no.button("Discard", key=f"discard_note_{idx}", width="stretch"):
                 st.session_state.pending_saves.pop(idx)
                 st.session_state.messages.append(
                     {"role": "assistant", "content": f"🗑️ Discarded the note `{pending['filename']}`."}
@@ -401,28 +562,20 @@ with tab_optimizer:
             "ui_components.py",
             "chat_store.py",
             ".env",
-            "id_rsa",
-            "agent_metrics.jsonl",
         }
         local_files = sorted(
             [
                 f.name
                 for f in PROJECT_ROOT.iterdir()
-                if f.is_file() and not f.name.startswith(".") and f.name not in ignored and f.suffix != ".jsonl" and not f.name.endswith((".json", ".key", ".pem"))
+                if f.is_file() and not f.name.startswith(".") and f.name not in ignored and f.suffix != ".jsonl"
             ]
         )
         if local_files:
             target_filename = st.selectbox("Target project file:", local_files)
             try:
-                resolved_target_path = (PROJECT_ROOT / target_filename).resolve()
-                if not resolved_target_path.is_relative_to(PROJECT_ROOT.resolve()) or any(part.startswith(".") for part in resolved_target_path.parts):
-                    st.error("Access denied: Invalid file path.")
-                else:
-                    source_code = resolved_target_path.read_text(encoding="utf-8")
+                source_code = (PROJECT_ROOT / target_filename).read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 st.error(f"`{target_filename}` is not a UTF-8 text file and cannot be optimized.")
-            except Exception as exc:
-                st.error(f"Could not read file: {exc}")
         else:
             st.warning("No target files found in project root.")
 
@@ -434,17 +587,34 @@ with tab_optimizer:
             st.code(extract_public_interface(target_filename, source_code), language="text")
             st.code(source_code, language=syntax_lang)
 
-        extra_goals = st.text_input(
+        source_hash = zip_fingerprint(source_code.encode("utf-8"))
+        scan = st.session_state.get("single_scan")
+        scan_report = scan["report"] if scan and scan["key"] == (target_filename, source_hash) else None
+
+        apply_pending_goal("single_goals")
+        extra_goals = st.text_area(
             "Optional custom optimization goals:",
+            key="single_goals",
+            height=90,
             placeholder="Leave blank for full default security & performance optimization, or add custom instructions...",
         )
 
-        col_audit, col_opt = st.columns(2)
+        col_scan, col_audit, col_opt = st.columns(3)
+
+        with col_scan:
+            if st.button("🛡️ Step 0: Scan with security & quality tools", width="stretch",
+                         help="Security and code-quality scanners for this file's language. Findings are passed to the auditor for triage."):
+                with st.spinner("Running scanners..."):
+                    report = run_scanners({target_filename: source_code})
+                st.session_state.single_scan = {"key": (target_filename, source_hash), "report": report}
+                st.rerun()
 
         with col_audit:
-            if st.button("🔍 Step 1: Audit Security & Limitations", use_container_width=True):
+            audit_label = "🔍 Step 1: Audit + triage findings" if scan_report and scan_report.findings else "🔍 Step 1: Audit Security & Limitations"
+            if st.button(audit_label, width="stretch"):
                 with st.spinner(f"Auditing `{target_filename}` ({lang_name})..."):
-                    st.session_state.audit_report = audit_code(target_filename, source_code)
+                    st.session_state.audit_report = call_ai(
+                        audit_code, target_filename, source_code, findings=scan_report.findings if scan_report else None)
                     st.session_state.audited_file = target_filename
                     st.session_state.opt_result = None
                     st.session_state.code_qa_history = []
@@ -454,7 +624,7 @@ with tab_optimizer:
                 st.session_state.get("audited_file") == target_filename
                 and st.session_state.get("audit_report")
             )
-            run_clicked = st.button("⚡ Step 2: Optimize & Verify in Sandbox", disabled=not audit_ready, use_container_width=True)
+            run_clicked = st.button("⚡ Step 2: Optimize & Verify in Sandbox", disabled=not audit_ready, width="stretch")
 
         if run_clicked:
             st.session_state.opt_result = run_with_stepper(
@@ -465,11 +635,19 @@ with tab_optimizer:
                     extra_goals=extra_goals,
                     status_callback=log,
                     progress_callback=progress,
+                    findings=scan_report.findings if scan_report else None,
+                    must_fix=selected_must_fix(scan_report.findings, f"mustfix_{source_hash[:12]}") if scan_report else None,
                 ),
-                f"Running {lang_name} Tester → Coder → Reviewer loop (details)",
+                f"Running {lang_name} Tester → Coder → Scanner re-check → Reviewer loop (details)",
             )
             st.session_state.code_qa_history = []
             st.rerun()
+
+        if scan_report:
+            with st.container(border=True):
+                render_scan_report(scan_report, "single_scan", goals_key="single_goals", show_file_filter=False,
+                                   verify_files={target_filename: source_code})
+                must_fix_selector(scan_report.findings, f"mustfix_{source_hash[:12]}")
 
         if st.session_state.get("audited_file") == target_filename and st.session_state.get("audit_report"):
             st.divider()
@@ -483,6 +661,7 @@ with tab_optimizer:
             st.subheader(f"🧪 Optimization Results — {format_tier_badge(res['approved'], tier)}")
             if res.get("stepper"):
                 html_block(stepper_html(res["stepper"]))
+            html_block(recheck_html(res.get("scan_check")))
 
             with st.expander(f"Iteration log ({len(res['logs'])})", expanded=not res["approved"]):
                 for entry in res["logs"]:
@@ -497,22 +676,19 @@ with tab_optimizer:
                     data=res["optimized_code"],
                     file_name=target_filename,
                     mime="text/plain",
-                    use_container_width=True,
+                    width="stretch",
                 )
             with col_promote:
                 if source_mode == "Select a file from project folder" and res["approved"]:
-                    if st.button(f"🚀 Promote & Overwrite Live `{target_filename}`", type="primary", use_container_width=True):
-                        safe_live_path = (PROJECT_ROOT / target_filename).resolve()
-                        if not safe_live_path.is_relative_to(PROJECT_ROOT.resolve()):
-                            st.error("Access denied: Target path traversal detected.")
-                        else:
-                            backup_path = backup_file(safe_live_path)
-                            safe_live_path.write_text(res["optimized_code"], encoding="utf-8")
-                            st.success(
-                                f"Live `{target_filename}` updated! Previous version saved to "
-                                f"`{backup_path.relative_to(PROJECT_ROOT)}`. Reloading..."
-                            )
-                            st.rerun()
+                    if st.button(f"🚀 Promote & Overwrite Live `{target_filename}`", type="primary", width="stretch"):
+                        live_path = PROJECT_ROOT / target_filename
+                        backup_path = backup_file(live_path)
+                        live_path.write_text(res["optimized_code"], encoding="utf-8")
+                        st.success(
+                            f"Live `{target_filename}` updated! Previous version saved to "
+                            f"`{backup_path.relative_to(PROJECT_ROOT)}`. Reloading..."
+                        )
+                        st.rerun()
 
             st.divider()
             st.subheader("💬 Ask About the Optimized Code or Request Changes")
@@ -527,7 +703,7 @@ with tab_optimizer:
                     "Your question or change request:",
                     placeholder="e.g., 'Why did you change port 8080?' or 'Keep the original timeout value of 30s and redo it'",
                 )
-                submitted = st.form_submit_button("Send to Code Agent", use_container_width=True)
+                submitted = st.form_submit_button("Send to Code Agent", width="stretch")
 
             if submitted and followup_input.strip():
                 st.session_state.code_qa_history.append({"role": "user", "content": followup_input})
@@ -540,6 +716,8 @@ with tab_optimizer:
                         user_message=followup_input,
                         status_callback=log,
                         progress_callback=progress,
+                        findings=scan_report.findings if scan_report else None,
+                        must_fix=selected_must_fix(scan_report.findings, f"mustfix_{source_hash[:12]}") if scan_report else None,
                     ),
                     "Analyzing follow-up request (details)",
                 )
@@ -596,18 +774,26 @@ with tab_project:
         if not all_ordered_files:
             st.warning("No supported code or config files found inside this .zip archive.")
         else:
-            # --- FILE SCOPE FILTER (UNSELECT FILES YOU WANT TO SKIP) ---
-            with st.expander(f"🎯 Filter Active Files ({len(all_ordered_files)} detected in archive)", expanded=False):
-                st.caption(
-                    "Unselect files you want to skip. Skipped files remain in the Repository Map for cross-file context and stay untouched in the final .zip."
-                )
-                active_scope = st.multiselect(
-                    "Files included in your optimization queue:",
-                    options=all_ordered_files,
-                    default=st.session_state.get("proj_selected_scope", all_ordered_files),
-                    key="proj_scope_multiselect",
-                )
-                st.session_state.proj_selected_scope = active_scope
+            # --- FILE SCOPE FILTER ---
+            # Folders + glob patterns instead of one chip per file: a multiselect with hundreds of selected files
+            # made every rerun slow in the browser.
+            scope_count = len(st.session_state.get("proj_selected_scope", all_ordered_files))
+            with st.expander(f"🎯 Filter Active Files ({scope_count} of {len(all_ordered_files)} in the queue)",
+                             expanded=False):
+                st.caption("Skipped files stay in the Repository Map for cross-file context and untouched in the "
+                           "final .zip.")
+                folders = sorted({str(PurePosixPath(p).parent) for p in all_ordered_files})
+                skip_folders = st.multiselect("Skip folders (and everything below them)", folders,
+                                              key="proj_scope_skip_folders")
+                patterns_txt = st.text_input("Only files matching (optional, comma-separated globs)",
+                                             key="proj_scope_glob",
+                                             placeholder="e.g. jb-auth-service/*, *.java, src/main/**/*Controller.java")
+                findings_only = st.checkbox("Only files with scanner findings (saves AI quota)",
+                                            key="proj_scope_findings_only",
+                                            disabled=not st.session_state.get("proj_scan"))
+                st.session_state.proj_selected_scope = filter_scope(
+                    all_ordered_files, skip_folders, patterns_txt,
+                    st.session_state.get("proj_scan") if findings_only else None)
 
             ordered_files = st.session_state.get("proj_selected_scope", all_ordered_files)
 
@@ -640,20 +826,41 @@ with tab_project:
                     st.success(f"🎉 All {len(ordered_files)} selected files completed!")
 
             with col_zip_dl:
-                zip_bytes = package_overlay_zip(
-                    st.session_state.proj_all_files,
-                    working_tree,
-                    audits_map,
-                    completed_set,
-                )
+                # Built only when clicked: packaging a large project on every rerun cost ~0.6 s plus memory.
+                snapshot = (st.session_state.proj_all_files, dict(working_tree), dict(audits_map), set(completed_set))
                 st.download_button(
                     label=f"⬇️ Download Project .zip ({len(completed_set)} updated)",
-                    data=zip_bytes,
+                    data=lambda snap=snapshot: package_overlay_zip(*snap),
+                    on_click="ignore",
                     file_name=f"optimized_{uploaded_zip.name}",
                     mime="application/zip",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
+
+            # --- WHOLE-PROJECT SECURITY SCAN ---
+            proj_scan = st.session_state.get("proj_scan")
+            with st.expander(
+                f"🛡️ Security & quality scan ({len(proj_scan.findings)} findings)" if proj_scan else "🛡️ Security & quality scan (not run yet)",
+                expanded=bool(proj_scan),
+            ):
+                st.caption("Security: Semgrep, Bandit, gitleaks (secrets), OSV-Scanner (dependency CVEs), and a data-flow analysis that "
+                           "follows user input across files into SQL, shell, eval, templates, paths, URLs and HTML. "
+                           "Quality & non-standard code: Ruff and mypy (Python), PMD (Java), ESLint and tsc (JS/TS/React). "
+                           "Only tools for the languages in the project run. Each file's findings go to its audit for triage.")
+                if st.button("🛡️ Re-scan project (includes accepted changes)" if proj_scan else "🛡️ Scan project",
+                             key="proj_scan_btn"):
+                    with st.spinner("Running scanners on the project..."):
+                        st.session_state.proj_scan = run_scanners(
+                            scannable_files(st.session_state.proj_all_files, working_tree))
+                    st.rerun()
+                if proj_scan:
+                    render_scan_report(proj_scan, "proj_scan_all", goals_key=None,
+                                       verify_files=scannable_files(st.session_state.proj_all_files, working_tree))
+                    outside = sorted({f.file for f in proj_scan.findings} - set(ordered_files))
+                    if outside:
+                        st.caption("Findings in files outside the optimization queue (manifests, skipped files): "
+                                   + ", ".join(f"`{p}`" for p in outside[:12]) + (" …" if len(outside) > 12 else ""))
 
             # --- FILE TREE COLOURED BY STATUS, IN DEPENDENCY ORDER ---
             statuses = {
@@ -662,7 +869,8 @@ with tab_project:
             }
             with st.expander("🗂️ Project files by status (numbered in dependency order)", expanded=True):
                 html_block(status_legend_html(Counter(statuses.values())))
-                html_block(file_tree_html(ordered_files, statuses, dep_map, st.session_state.get("proj_active_file")))
+                html_block(file_tree_html(ordered_files, statuses, dep_map, st.session_state.get("proj_active_file"),
+                                          finding_counts_by_file(proj_scan.findings) if proj_scan else None))
 
             with st.expander("🗺️ View Compact Repository Map & Dependency Order", expanded=False):
                 st.code(st.session_state.proj_repo_map, language="markdown")
@@ -691,10 +899,11 @@ with tab_project:
                 if st.button(
                     f"🔗 Run Cross-File Consistency Check ({len(completed_set)} saved)",
                     disabled=len(completed_set) == 0,
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     with st.spinner("Auditing cross-file method calls, getters, and repository contracts..."):
-                        st.session_state.proj_consistency = check_cross_file_consistency(
+                        st.session_state.proj_consistency = call_ai(
+                            check_cross_file_consistency,
                             working_tree=working_tree,
                             completed_files=completed_set,
                             repo_map=st.session_state.proj_repo_map,
@@ -778,17 +987,35 @@ with tab_project:
             with st.expander(f"📄 View Current Source: `{active_file}` ({lang_name})", expanded=False):
                 st.code(curr_code, language=syntax_lang)
 
-            file_goals = st.text_input(
+            file_findings = proj_scan.for_file(active_file) if proj_scan else []
+            if file_findings:
+                with st.expander(f"🛡️ Scanner findings in `{Path(active_file).name}` ({len(file_findings)})", expanded=True):
+                    render_scan_report(ScanReport(findings=file_findings, tools={}, file_count=1),
+                                       f"proj_scan_{zip_fingerprint(active_file.encode())[:10]}",
+                                       goals_key=f"goals_{active_file}", show_file_filter=False,
+                                       title="Findings for this file")
+                    if proj_scan.is_current(active_file, curr_code):
+                        must_fix_selector(file_findings, f"mustfix_{zip_fingerprint(curr_code.encode())[:12]}")
+                    else:
+                        st.caption("This file changed since the scan, so line numbers are stale and the scanner "
+                                   "re-check is off. Re-scan the project to turn it back on.")
+
+            apply_pending_goal(f"goals_{active_file}")
+            file_goals = st.text_area(
                 f"Optional custom goals for `{active_file}`:",
                 key=f"goals_{active_file}",
+                height=90,
                 placeholder="Leave blank for default security & performance optimization, or add specific instructions...",
             )
 
             col_b1, col_b2 = st.columns(2)
             with col_b1:
-                if st.button(f"🔍 Step 1: Audit `{Path(active_file).name}`", use_container_width=True):
+                audit_label = (f"🔍 Step 1: Audit + triage {len(file_findings)} finding(s) in `{Path(active_file).name}`"
+                               if file_findings else f"🔍 Step 1: Audit `{Path(active_file).name}`")
+                if st.button(audit_label, width="stretch"):
                     with st.spinner(f"Auditing `{active_file}`..."):
-                        audits_map[active_file] = audit_code(active_file, curr_code)
+                        audits_map[active_file] = call_ai(audit_code, active_file, curr_code,
+                                                          findings=file_findings or None)
                         results_map.pop(active_file, None)
                     st.rerun()
 
@@ -797,9 +1024,11 @@ with tab_project:
                 optimize_clicked = st.button(
                     f"⚡ Step 2: Optimize `{Path(active_file).name}` (With Neighbor Context)",
                     disabled=not has_audit,
-                    use_container_width=True,
+                    width="stretch",
                 )
 
+            recheck_findings = (file_findings if file_findings and proj_scan.is_current(active_file, curr_code)
+                                else None)
             if optimize_clicked:
                 context_goals = build_neighbor_context(
                     target_rel_path=active_file,
@@ -818,6 +1047,9 @@ with tab_project:
                         target_rel_path=active_file,
                         status_callback=log,
                         progress_callback=progress,
+                        findings=recheck_findings,
+                        must_fix=selected_must_fix(recheck_findings, f"mustfix_{zip_fingerprint(curr_code.encode())[:12]}")
+                        if recheck_findings else None,
                     ),
                     f"Optimizing `{active_file}` with imported neighbor context (details)",
                 )
@@ -837,6 +1069,7 @@ with tab_project:
                 st.subheader(f"🧪 Results for `{active_file}` — {format_tier_badge(res['approved'], tier)}")
                 if res.get("stepper"):
                     html_block(stepper_html(res["stepper"]))
+                html_block(recheck_html(res.get("scan_check")))
 
                 with st.expander(f"Iteration log ({len(res['logs'])})", expanded=not res["approved"]):
                     for log_line in res["logs"]:
@@ -849,7 +1082,7 @@ with tab_project:
                     if st.button(
                         "✅ Accept Changes & Advance to Next File",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         working_tree[active_file] = res["optimized_code"]
                         completed_set.add(active_file)
@@ -859,7 +1092,7 @@ with tab_project:
                         st.rerun()
 
                 with col_skip:
-                    if st.button("⏭️ Mark Completed Without Changes & Advance", use_container_width=True):
+                    if st.button("⏭️ Mark Completed Without Changes & Advance", width="stretch"):
                         completed_set.add(active_file)
                         next_rem = [f for f in ordered_files if f not in completed_set]
                         if next_rem:
@@ -883,7 +1116,7 @@ with tab_project:
                     )
                     col_f1, col_f2 = st.columns([2, 1])
                     with col_f1:
-                        q_sub = st.form_submit_button("Send to Code Agent", type="primary", use_container_width=True)
+                        q_sub = st.form_submit_button("Send to Code Agent", type="primary", width="stretch")
                     with col_f2:
                         force_code_edit = st.checkbox("Force code rewrite", value=True)
 
@@ -913,6 +1146,9 @@ with tab_project:
                             project_context_files=working_tree,
                             target_rel_path=active_file,
                             progress_callback=progress,
+                            findings=recheck_findings,
+                            must_fix=selected_must_fix(recheck_findings, f"mustfix_{zip_fingerprint(curr_code.encode())[:12]}")
+                            if recheck_findings else None,
                         ),
                         "Applying suggestion & re-verifying with imported files (details)",
                     )

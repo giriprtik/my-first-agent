@@ -6,8 +6,10 @@ from unittest.mock import patch
 import file_optimizer as fo
 import scanners as sc
 import ui_components as ui
-from test_optimizer_pipeline import FakeAgent, ORIGINAL, REQ_REAL
-
+try:
+    from tests.test_optimizer_pipeline import FakeAgent, ORIGINAL, REQ_REAL   # discover -s tests -t .
+except ImportError:
+    from test_optimizer_pipeline import FakeAgent, ORIGINAL, REQ_REAL         # discover tests
 
 def F(rule, line, snippet="", severity="high", category="security", tool="semgrep", in_test=False):
     return sc.Finding(tool=tool, rule_id=rule, severity=severity, category=category, title=rule,

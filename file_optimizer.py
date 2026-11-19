@@ -1,4 +1,6 @@
 import ast
+import contextlib
+import contextvars
 import difflib
 import json
 import os
@@ -16,6 +18,8 @@ from google import genai
 from google.genai import types
 from google.genai.errors import ServerError
 
+from scanners import default_must_fix, findings_prompt_block, recheck_feedback, recheck_file, recheck_summary
+
 
 load_dotenv()
 
@@ -24,6 +28,39 @@ OPTIMIZER_MODELS = [
     "gemini-3.1-flash-lite",
     "gemini-3.8-flash",
 ]
+
+# ---- Size-based model tiers --------------------------------------------------------------
+# Large files go to stronger models first (then the light models above, then the llm_router fallback).
+# Override in .env: OPTIMIZER_HEAVY_MODELS=gemini-3.5-flash,gemini-3.1-pro-preview
+HEAVY_OPTIMIZER_MODELS = [m.strip() for m in os.getenv("OPTIMIZER_HEAVY_MODELS", "gemini-3.5-flash").split(",")
+                          if m.strip()]
+LARGE_FILE_LINES = int(os.getenv("OPTIMIZER_LARGE_FILE_LINES", "250"))
+DEFAULT_MAX_ITERATIONS = int(os.getenv("OPTIMIZER_MAX_ITERATIONS", "3"))
+LARGE_FILE_MAX_ITERATIONS = int(os.getenv("OPTIMIZER_LARGE_FILE_MAX_ITERATIONS", "5"))
+
+# Set per optimization run (contextvars are per-thread, so concurrent Streamlit sessions don't mix tiers)
+_heavy_tier: contextvars.ContextVar[bool] = contextvars.ContextVar("heavy_tier", default=False)
+
+
+def is_large_file(code: str) -> bool:
+    return (code or "").count("\n") + 1 >= LARGE_FILE_LINES
+
+
+@contextlib.contextmanager
+def use_heavy_models(enabled: bool = True):
+    """Within this block, ask_agent tries HEAVY_OPTIMIZER_MODELS before OPTIMIZER_MODELS."""
+    token = _heavy_tier.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _heavy_tier.reset(token)
+
+
+def active_optimizer_models() -> list[str]:
+    """Model priority for the current call: heavy first for large files, light models always as backup."""
+    if _heavy_tier.get():
+        return HEAVY_OPTIMIZER_MODELS + [m for m in OPTIMIZER_MODELS if m not in HEAVY_OPTIMIZER_MODELS]
+    return list(OPTIMIZER_MODELS)
 
 # Free Tier allows 15 RPM per model; pacing calls ~4.2s apart prevents burst 429s
 MIN_SECONDS_BETWEEN_CALLS = 4.2
@@ -131,8 +168,8 @@ def _public_defs(tree: ast.Module) -> dict[str, ast.AST]:
     return defs
 
 
-def _module_level_names(tree: ast.Module, max_depth: int = 50) -> set[str]:
-    """Names bound at module level by assignments, imports and definitions with a recursion safety depth limit."""
+def _module_level_names(tree: ast.Module) -> set[str]:
+    """Names bound at module level by assignments, imports and definitions (what `from module import X` can see)."""
     names: set[str] = set()
     for node in tree.body:
         targets = []
@@ -145,33 +182,21 @@ def _module_level_names(tree: ast.Module, max_depth: int = 50) -> set[str]:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         for target in targets:
-            stack = [(target, 0)]
-            while stack:
-                curr, depth = stack.pop()
-                if depth > max_depth:
-                    continue
-                if isinstance(curr, ast.Name):
-                    names.add(curr.id)
-                for child in ast.iter_child_nodes(curr):
-                    stack.append((child, depth + 1))
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Name):
+                    names.add(sub.id)
     return names
 
 
-def _public_assigned_names(tree: ast.Module, max_depth: int = 50) -> set[str]:
-    """Public module-level variables/constants (e.g. MODELS), with a recursion safety depth limit."""
+def _public_assigned_names(tree: ast.Module) -> set[str]:
+    """Public module-level variables/constants (e.g. MODELS), which other files may import."""
     names: set[str] = set()
     for node in tree.body:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
         for target in targets:
-            stack = [(target, 0)]
-            while stack:
-                curr, depth = stack.pop()
-                if depth > max_depth:
-                    continue
-                if isinstance(curr, ast.Name) and not curr.id.startswith("_"):
-                    names.add(curr.id)
-                for child in ast.iter_child_nodes(curr):
-                    stack.append((child, depth + 1))
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Name) and not sub.id.startswith("_"):
+                    names.add(sub.id)
     return names
 
 
@@ -285,16 +310,11 @@ def extract_public_interface(filename: str, source_code: str) -> str:
 
 
 def _log_telemetry(model_name: str, latency: float, response) -> None:
-    """Appends optimizer token & latency metrics to agent_metrics.jsonl with secure permissions."""
-    try:
-        usage = getattr(response, "usage_metadata", None)
-        prompt_tokens = (getattr(usage, "prompt_token_count", 0) or 0) if usage else 0
-        cand_tokens = (getattr(usage, "candidates_token_count", 0) or 0) if usage else 0
-        total_tokens = (getattr(usage, "total_token_count", 0) or 0) if usage else 0
-    except Exception:
-        prompt_tokens = 0
-        cand_tokens = 0
-        total_tokens = 0
+    """Appends optimizer token & latency metrics to agent_metrics.jsonl."""
+    usage = getattr(response, "usage_metadata", None)
+    prompt_tokens = (getattr(usage, "prompt_token_count", 0) or 0) if usage else 0
+    cand_tokens = (getattr(usage, "candidates_token_count", 0) or 0) if usage else 0
+    total_tokens = (getattr(usage, "total_token_count", 0) or 0) if usage else 0
 
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -306,46 +326,176 @@ def _log_telemetry(model_name: str, latency: float, response) -> None:
         "total_tokens": total_tokens,
     }
     try:
-        with _PACE_LOCK:
-            fd = os.open(METRICS_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with open(fd, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+        with open(METRICS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
 
 
-def _log_error(model_name: str, error: Exception) -> None:
-    """Records a failed Gemini call with secure file permissions so the sidebar can show errors per model."""
+def _log_error(model_name: str, error: Exception, latency: float | None = None) -> None:
+    """Records a failed Gemini call so the sidebar can show errors per model (and how long the failure took)."""
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "optimizer",
         "model": model_name,
         "error": f"{type(error).__name__}: {error}"[:300],
     }
+    if latency is not None:
+        entry["latency_sec"] = round(latency, 4)
     try:
-        with _PACE_LOCK:
-            fd = os.open(METRICS_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with open(fd, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+        with open(METRICS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
 
 
 def _wait_for_call_slot() -> None:
-    """Reserves the next request slot using condition/sleep without holding the global lock during sleep,
-    preventing thread starvation while keeping requests paced across concurrent sessions."""
+    """Reserves the next request slot. Holding the lock while sleeping serialises concurrent sessions,
+    so the ~15 RPM pacing holds across all Streamlit threads, not just within one."""
     global _last_call_ts
     with _PACE_LOCK:
-        now = time.perf_counter()
-        wait = _last_call_ts + MIN_SECONDS_BETWEEN_CALLS - now
+        wait = _last_call_ts + MIN_SECONDS_BETWEEN_CALLS - time.perf_counter()
         if wait > 0:
-            _last_call_ts = now + wait
-        else:
-            _last_call_ts = now
-            wait = 0.0
+            time.sleep(wait)
+        _last_call_ts = time.perf_counter()
 
-    if wait > 0:
-        time.sleep(wait)
+
+class GeminiQuotaError(RuntimeError):
+    """Every optimizer model is out of quota (or unavailable). `resets` maps model -> epoch seconds."""
+
+    def __init__(self, message: str, resets: dict[str, float]):
+        super().__init__(message)
+        self.resets = resets
+
+
+# model -> epoch seconds until which it is skipped (daily quota spent, model not served, per-minute limit)
+_model_cooldown: dict[str, float] = {}
+_cooldown_reason: dict[str, str] = {}
+_cooldown_lock = threading.Lock()
+LONG_COOLDOWN_SEC = 90          # a 429 asking to wait longer than this is a daily/hard quota: skip the model
+# A model that is overloaded (503) or timing out (504 / client timeout) is skipped for a while, so the next
+# calls go straight to a working model instead of waiting ~90s on the same failure every time.
+BUSY_COOLDOWN_SEC = int(os.getenv("OPTIMIZER_BUSY_COOLDOWN_SEC", "300"))
+
+
+def _parse_retry_delay(err_str: str) -> float | None:
+    """Seconds Gemini asks us to wait: RetryInfo 'retryDelay': '8272s', or 'retry in 2h17m52.6s' / 'retry in 41s'."""
+    m = re.search(r"retryDelay['\"]?\s*[:=]\s*['\"](\d+(?:\.\d+)?)s", err_str)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"retry in\s+((?:\d+(?:\.\d+)?[hms])+)", err_str, re.IGNORECASE)
+    if m:
+        total = 0.0
+        for value, unit in re.findall(r"(\d+(?:\.\d+)?)([hms])", m.group(1)):
+            total += float(value) * {"h": 3600, "m": 60, "s": 1}[unit]
+        return total
+    return None
+
+
+def _set_cooldown(model: str, seconds: float, reason: str) -> None:
+    with _cooldown_lock:
+        _model_cooldown[model] = time.time() + max(1.0, seconds)
+        _cooldown_reason[model] = reason
+
+
+def available_optimizer_models() -> list[str]:
+    now = time.time()
+    with _cooldown_lock:
+        return [m for m in active_optimizer_models() if _model_cooldown.get(m, 0) <= now]
+
+
+def model_cooldowns() -> dict[str, dict]:
+    """Models currently skipped, for the UI: {model: {"until": epoch, "reason": str}}."""
+    now = time.time()
+    with _cooldown_lock:
+        return {m: {"until": t, "reason": _cooldown_reason.get(m, "")} for m, t in _model_cooldown.items() if t > now}
+
+
+def _quota_message() -> str:
+    parts = []
+    for model, info in sorted(model_cooldowns().items(), key=lambda kv: kv[1]["until"]):
+        wait = max(0, int(info["until"] - time.time()))
+        parts.append(f"{model} ({info['reason']}, available again in {wait // 3600}h{(wait % 3600) // 60:02d}m)")
+    return ("All Gemini models are out of quota or unavailable: " + "; ".join(parts) +
+            ". Wait for the reset, add a model with free quota to OPTIMIZER_MODELS, or enable billing on the API key.")
+
+
+class GeminiUnavailableError(RuntimeError):
+    """Gemini kept failing (server errors / timeouts) for every retry."""
+
+
+def _strip_code_fences(text: str) -> str:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
+    return text.strip()
+
+
+# ---- Non-Gemini fallback (llm_router) -------------------------------------------------------
+# Used only after every Gemini model is out of quota or unavailable. Turn off with LLM_FALLBACK=off.
+_fallback_llm = None
+_fallback_checked = False
+_fallback_lock = threading.Lock()
+
+
+def get_fallback_llm():
+    """Lazy FallbackLLM over every non-Gemini key in .env; None if disabled, not installed, or no keys."""
+    global _fallback_llm, _fallback_checked
+    if os.getenv("LLM_FALLBACK", "on").strip().lower() in ("0", "off", "false", "no"):
+        return None
+    with _fallback_lock:
+        if not _fallback_checked:
+            _fallback_checked = True
+            try:
+                from llm_router import FallbackLLM, build_pool_from_env, DEFAULT_PRIORITY
+                providers = set(DEFAULT_PRIORITY) - {"gemini"}   # Gemini is already handled natively above
+                _fallback_llm = FallbackLLM(build_pool_from_env(providers=providers), log=lambda *_: None)
+            except Exception:                                   # no llm_router / no non-Gemini keys
+                _fallback_llm = None
+        return _fallback_llm
+
+
+def fallback_status() -> list[dict]:
+    """Provider health for the UI (empty when the fallback isn't configured)."""
+    llm = get_fallback_llm()
+    return llm.pool.status() if llm else []
+
+
+def _log_fallback_telemetry(model_name: str, latency: float, response) -> None:
+    usage = getattr(response, "usage", None)
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "optimizer",
+        "model": model_name,
+        "latency_sec": round(latency, 4),
+        "prompt_tokens": (getattr(usage, "prompt_tokens", 0) or 0) if usage else 0,
+        "candidates_tokens": (getattr(usage, "completion_tokens", 0) or 0) if usage else 0,
+        "total_tokens": (getattr(usage, "total_tokens", 0) or 0) if usage else 0,
+    }
+    try:
+        with open(METRICS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
+def _ask_fallback(llm, system_role: str, prompt: str, strip_fences: bool, json_mode: bool) -> str:
+    """Same request through OpenRouter / Groq / Cloudflare / ... (OpenAI chat format)."""
+    system = system_role + ("\n\nRespond with a single valid JSON object and nothing else." if json_mode else "")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+    start = time.perf_counter()
+    try:
+        kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+        response = llm.chat(messages, temperature=0.2, **kwargs)
+    except Exception:
+        if not json_mode:
+            raise
+        response = llm.chat(messages, temperature=0.2)           # some providers reject response_format
+    model_name = f"{response.router_provider}:{getattr(response, 'model', '') or '?'}"
+    _log_fallback_telemetry(model_name, time.perf_counter() - start, response)
+    text = response.choices[0].message.content or ""
+    return _strip_code_fences(text) if strip_fences else text.strip()
 
 
 def ask_agent(
@@ -355,15 +505,52 @@ def ask_agent(
     max_retries: int = 4,
     json_mode: bool = False,
 ) -> str:
-    """Calls Gemini with RPM pacing, automatic 429 backoff, model fallback, and telemetry logging.
+    """Gemini first (pacing, quota-aware model fallback, telemetry — see _ask_gemini). If every Gemini model is
+    out of quota or keeps failing, the same request goes to the non-Gemini providers in .env via llm_router.
+    If those fail too, the original Gemini error is raised, so the UI's quota messages are unchanged."""
+    try:
+        return _ask_gemini(system_role, prompt, strip_fences, max_retries, json_mode)
+    except (GeminiQuotaError, GeminiUnavailableError) as gemini_error:
+        llm = get_fallback_llm()
+        if llm is None:
+            raise
+        try:
+            return _ask_fallback(llm, system_role, prompt, strip_fences, json_mode)
+        except Exception as fallback_error:
+            _log_error("fallback", fallback_error)
+            raise gemini_error from fallback_error
+
+
+def _ask_gemini(
+    system_role: str,
+    prompt: str,
+    strip_fences: bool = True,
+    max_retries: int = 4,
+    json_mode: bool = False,
+) -> str:
+    """Calls Gemini with RPM pacing, quota-aware model fallback and telemetry logging.
+
+    429 handling: a daily or hard quota (Gemini asks to wait more than LONG_COOLDOWN_SEC) puts that model on
+    cooldown for the rest of the wait, and the next model is tried immediately instead of sleeping. A per-minute
+    limit makes us wait only when no other model is available. A model the API doesn't serve (404) is skipped.
+    Raises GeminiQuotaError when every model is cooling down.
 
     json_mode=True asks Gemini for `application/json` output, so verdicts arrive as parseable JSON
     instead of prose that happens to contain JSON."""
     last_error = None
-    state = {}
+    tried: list[str] = []
 
     for attempt in range(max_retries):
-        model_name = OPTIMIZER_MODELS[attempt % len(OPTIMIZER_MODELS)]
+        candidates = available_optimizer_models()
+        if not candidates:
+            soonest = min(_model_cooldown.values()) - time.time()
+            if soonest > LONG_COOLDOWN_SEC:
+                raise GeminiQuotaError(_quota_message(), dict(_model_cooldown))
+            time.sleep(max(1.0, soonest))               # only per-minute limits left: wait for the first reset
+            candidates = available_optimizer_models() or active_optimizer_models()[:1]
+        untried = [m for m in candidates if m not in tried]          # prefer the next model in priority order
+        model_name = untried[0] if untried else candidates[attempt % len(candidates)]
+        tried.append(model_name)
 
         # Pace requests so we stay safely under the 15 RPM Free Tier limit
         _wait_for_call_slot()
@@ -381,34 +568,43 @@ def ask_agent(
             )
             _log_telemetry(model_name, time.perf_counter() - start, response)
 
-            text = (getattr(response, "text", None) or "").strip()
-            if strip_fences and text.startswith("```"):
-                lines = text.splitlines()
-                text = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
-            return text.strip()
+            text = response.text or ""
+            return _strip_code_fences(text) if strip_fences else text.strip()
 
         except ServerError as e:
             last_error = e
-            state["last_error"] = e
-            _log_error(model_name, e)
-            time.sleep(3.0)
+            _log_error(model_name, e, time.perf_counter() - start)
+            if getattr(e, "code", None) in (503, 504):
+                _set_cooldown(model_name, BUSY_COOLDOWN_SEC,
+                              "overloaded (503)" if e.code == 503 else "timing out (504)")
+            if not available_optimizer_models():
+                time.sleep(3.0)                     # nothing else to try: brief pause before retrying
             continue
         except Exception as e:
             last_error = e
-            state["last_error"] = e
-            _log_error(model_name, e)
+            _log_error(model_name, e, time.perf_counter() - start)
             err_str = str(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
-                wait_sec = float(match.group(1)) + 2.0 if match else 30.0
-                time.sleep(min(wait_sec, 65.0))
+                delay = _parse_retry_delay(err_str)
+                daily = "PerDay" in err_str or "per day" in err_str.lower()
+                if daily or (delay or 0) > LONG_COOLDOWN_SEC:
+                    _set_cooldown(model_name, delay or 3600.0, "daily quota used" if daily else "quota exceeded")
+                else:
+                    _set_cooldown(model_name, (delay or 30.0) + 1.0, "per-minute limit")
+                continue
+            if "404" in err_str or "NOT_FOUND" in err_str:
+                _set_cooldown(model_name, 24 * 3600, "model not available")
                 continue
             if "timeout" in err_str.lower() or "timed out" in err_str.lower():
-                time.sleep(3.0)
+                _set_cooldown(model_name, BUSY_COOLDOWN_SEC, "timing out")
+                if not available_optimizer_models():
+                    time.sleep(3.0)
                 continue
             raise
 
-    raise RuntimeError(f"Gemini call failed after {max_retries} attempts (last error: {last_error}, state: {state})")
+    if not available_optimizer_models():
+        raise GeminiQuotaError(_quota_message(), dict(_model_cooldown))
+    raise GeminiUnavailableError(f"Gemini call failed after {max_retries} attempts (last error: {last_error})")
 
 
 def run_isolated_verification(
@@ -421,12 +617,7 @@ def run_isolated_verification(
     Runs verification in a brand-new temporary directory with API keys stripped from env.
     Returns (passed, tier, output) where tier is 'tests_ran', 'syntax_only', or 'none'.
     """
-    # Strict path sanitization to prevent command and path injection
-    cleaned_target = os.path.normpath(target_rel_path).lstrip(os.sep)
-    if cleaned_target.startswith("..") or os.path.isabs(target_rel_path):
-        return False, "none", f"ERROR: Target path `{target_rel_path}` is outside the permitted sandbox."
-
-    ext = Path(cleaned_target).suffix.lower()
+    ext = Path(target_rel_path).suffix.lower()
     minimal_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", ""),
@@ -437,26 +628,21 @@ def run_isolated_verification(
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp) / "run"
         run_dir.mkdir()
-        run_dir = run_dir.resolve()
+        run_dir = run_dir.resolve()  # one canonical root (macOS: /var -> /private/var) for every check below
 
         for rel, content in project_files.items():
-            norm_rel = os.path.normpath(rel).lstrip(os.sep)
-            if norm_rel.startswith("..") or os.path.isabs(rel):
-                continue
-            dest = (run_dir / norm_rel).resolve()
+            dest = (run_dir / rel).resolve()
             if dest.is_relative_to(run_dir):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content, encoding="utf-8")
 
         if test_rel_path and test_code:
-            norm_test = os.path.normpath(test_rel_path).lstrip(os.sep)
-            if not norm_test.startswith("..") and not os.path.isabs(test_rel_path):
-                test_dest = (run_dir / norm_test).resolve()
-                if test_dest.is_relative_to(run_dir):
-                    test_dest.parent.mkdir(parents=True, exist_ok=True)
-                    test_dest.write_text(test_code, encoding="utf-8")
+            test_dest = (run_dir / test_rel_path).resolve()
+            if test_dest.is_relative_to(run_dir):
+                test_dest.parent.mkdir(parents=True, exist_ok=True)
+                test_dest.write_text(test_code, encoding="utf-8")
 
-        target_file = (run_dir / cleaned_target).resolve()
+        target_file = (run_dir / target_rel_path).resolve()
         if not target_file.is_relative_to(run_dir):
             return False, "none", f"ERROR: Target path `{target_rel_path}` points outside the sandbox."
         if not target_file.is_file():
@@ -465,7 +651,7 @@ def run_isolated_verification(
         if not code.strip():
             return False, "none", "ERROR: Refactored file is empty."
         
-        # Build PYTHONPATH including run_dir and the target file's parent directory
+        # Build PYTHONPATH including run_dir and the target file's parent directory (e.g., my-first-agent/)
         target_parent = str(target_file.parent)
         python_paths = [str(run_dir)]
         if target_parent not in python_paths:
@@ -481,7 +667,7 @@ def run_isolated_verification(
                         env=minimal_env,
                         capture_output=True,
                         text=True,
-                        timeout=10,
+                        timeout=15,
                     )
                     return res.returncode == 0, "tests_ran", (res.stdout + "\n" + res.stderr).strip()
                 ast.parse(code)
@@ -496,11 +682,11 @@ def run_isolated_verification(
                         env=minimal_env,
                         capture_output=True,
                         text=True,
-                        timeout=10,
+                        timeout=15,
                     )
                     return res.returncode == 0, "tests_ran", (res.stdout + "\n" + res.stderr).strip()
                 res = subprocess.run(
-                    ["node", "--check", cleaned_target],
+                    ["node", "--check", target_rel_path],
                     cwd=run_dir,
                     env=minimal_env,
                     capture_output=True,
@@ -512,17 +698,18 @@ def run_isolated_verification(
             # 3. TypeScript -> tsc --noEmit
             if ext in {".ts", ".tsx"} and shutil.which("tsc"):
                 res = subprocess.run(
-                    ["tsc", "--noEmit", cleaned_target],
+                    ["tsc", "--noEmit", target_rel_path],
                     cwd=run_dir,
                     env=minimal_env,
                     capture_output=True,
                     text=True,
-                    timeout=15,
+                    timeout=20,
                 )
                 return res.returncode == 0, "syntax_only", (res.stdout + "\n" + res.stderr).strip() or "TypeScript type-check passed."
 
             # 4. Java -> Maven/Gradle full build if pom.xml/build.gradle exists, else standalone javac
             if ext == ".java":
+                # Find nearest pom.xml or build.gradle in the isolated project tree
                 build_dir = None
                 build_tool = None
                 for parent in [target_file.parent, *target_file.parents]:
@@ -539,29 +726,20 @@ def run_isolated_verification(
 
                 if build_tool == "maven" and shutil.which("mvn"):
                     res = subprocess.run(
-                        ["mvn", "-q", "test-compile"],
+                        ["mvn", "-o", "-q", "test-compile"],
                         cwd=build_dir,
                         env=minimal_env,
                         capture_output=True,
                         text=True,
-                        timeout=30,
+                        timeout=45,
                     )
                     output = (res.stdout + "\n" + res.stderr).strip()
                     if res.returncode == 0:
-                        return True, "syntax_only", "Spring/Maven project compiled cleanly (`mvn test-compile`)."
+                        return True, "syntax_only", "Spring/Maven project compiled cleanly (`mvn -o test-compile`)."
                     if "cannot access central" in output.lower() or "not cached in the local repository" in output.lower():
-                        res_offline = subprocess.run(
-                            ["mvn", "-o", "-q", "test-compile"],
-                            cwd=build_dir,
-                            env=minimal_env,
-                            capture_output=True,
-                            text=True,
-                            timeout=20,
-                        )
-                        if res_offline.returncode == 0:
-                            return True, "syntax_only", "Spring/Maven project compiled cleanly (`mvn -o test-compile`)."
                         return True, "none", "Maven offline cache incomplete; routed to Reviewer Agent."
-                    target_name = Path(cleaned_target).name
+                    # Check if the compilation error is actually inside the target file being edited
+                    target_name = Path(target_rel_path).name
                     if target_name not in output:
                         return (
                             True,
@@ -570,33 +748,25 @@ def run_isolated_verification(
                         )
                     return False, "syntax_only", output or "Maven compilation failed."
 
+
                 if build_tool == "gradle" and (shutil.which("gradle") or (build_dir / "gradlew").exists()):
                     gradle_cmd = ["./gradlew"] if (build_dir / "gradlew").exists() else ["gradle"]
                     res = subprocess.run(
-                        gradle_cmd + ["--quiet", "compileJava"],
+                        gradle_cmd + ["--offline", "--quiet", "compileJava"],
                         cwd=build_dir,
                         env=minimal_env,
                         capture_output=True,
                         text=True,
-                        timeout=30,
+                        timeout=45,
                     )
                     output = (res.stdout + "\n" + res.stderr).strip()
                     if res.returncode == 0:
                         return True, "syntax_only", "Spring/Gradle project compiled cleanly (`compileJava`)."
                     if "no cached version" in output.lower():
-                        res_offline = subprocess.run(
-                            gradle_cmd + ["--offline", "--quiet", "compileJava"],
-                            cwd=build_dir,
-                            env=minimal_env,
-                            capture_output=True,
-                            text=True,
-                            timeout=20,
-                        )
-                        if res_offline.returncode == 0:
-                            return True, "syntax_only", "Spring/Gradle project compiled cleanly (`compileJava --offline`)."
                         return True, "none", "Gradle offline cache incomplete; routed to Reviewer Agent."
                     return False, "syntax_only", output or "Gradle compilation failed."
 
+                # Fallback for standalone JDK files without Maven/Gradle
                 if any(pkg in code for pkg in SPRING_OR_EXTERNAL_JAVA_MARKERS):
                     return (
                         True,
@@ -617,14 +787,14 @@ def run_isolated_verification(
                         and not any(pkg in test_code for pkg in external_test_markers)
                     )
 
-                    files = [cleaned_target] + ([test_rel_path] if can_compile_test else [])
+                    files = [target_rel_path] + ([test_rel_path] if can_compile_test else [])
                     res = subprocess.run(
                         cmd + files,
                         cwd=run_dir,
                         env=minimal_env,
                         capture_output=True,
                         text=True,
-                        timeout=10,
+                        timeout=15,
                     )
                     if res.returncode != 0:
                         return False, "syntax_only", (res.stdout + "\n" + res.stderr).strip()
@@ -637,7 +807,7 @@ def run_isolated_verification(
                             env=minimal_env,
                             capture_output=True,
                             text=True,
-                            timeout=10,
+                            timeout=15,
                         )
                         return run_res.returncode == 0, "tests_ran", (run_res.stdout + "\n" + run_res.stderr).strip()
                     return True, "syntax_only", "Standalone Java class compiled cleanly with `javac`."
@@ -645,7 +815,7 @@ def run_isolated_verification(
             # 5. Shell script -> bash -n
             if ext == ".sh" and shutil.which("bash"):
                 res = subprocess.run(
-                    ["bash", "-n", cleaned_target],
+                    ["bash", "-n", target_rel_path],
                     cwd=run_dir,
                     env=minimal_env,
                     capture_output=True,
@@ -692,6 +862,9 @@ Write tests that verify the CURRENT behavior of the original file so refactoring
 - For Python: use `unittest`. For JS: use `node:test` and `node:assert/strict`. For Java: write `TestRegression.java` with `public static void main`.
 - Return ONLY raw source code. No markdown backticks or explanations.
 - For Python: use `unittest` and import the target module by its plain module stem (e.g. `import tools` or `from tools import ...`) because its parent directory is already on `PYTHONPATH`. NEVER use parent folder names or hyphens in import statements.
+- Compare filesystem paths only after calling `.resolve()` on BOTH sides (on macOS, temp dirs under /var are symlinks to /private/var).
+- Mock at stable seams the refactor may keep: patch a module-level name itself (`patch.object(module, "client", fake)` or a factory like `get_client`), NEVER a nested attribute chain like `module.client.models.generate_content`, because a refactor may make that object lazy (None until first use) or rename it.
+- Test behaviour only through the public interface; do not depend on private helpers, internal call order, or how objects are constructed.
 """
 
 REQUIREMENT_TESTER_PROMPT = """
@@ -702,6 +875,9 @@ Write tests that verify the security fixes, new validations, and optimizations f
 - For Java: write `TestRequirements.java` using ONLY standard JDK (`java.*`) and `public static void main(String[] args)` with `if (...) throw new RuntimeException(...)`. NEVER import `org.junit.*`, `org.mockito.*`, or `jakarta.*`.
 - Return ONLY raw source code. No markdown backticks or explanations.
 - For Python: use `unittest` and import the target module by its plain module stem (e.g. `import tools` or `from tools import ...`) because its parent directory is already on `PYTHONPATH`. NEVER use parent folder names or hyphens in import statements.
+- Compare filesystem paths only after calling `.resolve()` on BOTH sides (on macOS, temp dirs under /var are symlinks to /private/var).
+- Mock at stable seams the refactor may keep: patch a module-level name itself (`patch.object(module, "client", fake)` or a factory like `get_client`), NEVER a nested attribute chain like `module.client.models.generate_content`, because a refactor may make that object lazy (None until first use) or rename it.
+- Test behaviour only through the public interface; do not depend on private helpers, internal call order, or how objects are constructed.
 """
 
 CODER_PROMPT = """
@@ -738,8 +914,24 @@ def _parse_reviewer_verdict(raw_text: str) -> tuple[bool, str]:
     return data.get("approved") is True, reason
 
 
-def audit_code(filename: str, source_code: str) -> str:
-    """Runs Phase 1: Multi-language Security, Performance & Limitations Audit."""
+SCANNER_TRIAGE_PROMPT = """
+Deterministic scanners (Semgrep, gitleaks, OSV-Scanner) already ran on this file. Their findings are listed under
+SCANNER FINDINGS. Before the three sections, add:
+### 0. Scanner Findings Triage
+A Markdown table with one row per finding: `#`, `Rule`, `Line`, `Verdict` (Confirmed / False positive / Needs context),
+`Why` (one sentence that references the actual code), `Fix` (one sentence).
+Rules: judge each finding against the code, do not trust the scanner blindly; a finding is a false positive only if
+the flagged data is provably not attacker-controlled or already safely handled. Never call a hard-coded secret a false
+positive unless it is clearly a placeholder. Then, in sections 1-3, cover what the scanners MISSED (logic flaws,
+authorization gaps, missing validation, race conditions) rather than repeating confirmed findings.
+"""
+
+
+def audit_code(filename: str, source_code: str, findings: list | None = None) -> str:
+    """Runs Phase 1: Multi-language Security, Performance & Limitations Audit.
+
+    `findings` (scanners.Finding objects for this file) turns the audit into triage + gap analysis.
+    """
     lang_name, _, _ = get_language_info(filename)
     public_api = extract_public_interface(filename, source_code)
     prompt = (
@@ -747,9 +939,95 @@ def audit_code(filename: str, source_code: str) -> str:
         f"Detected Public Interface / Structure:\n{public_api}\n\n"
         f"File Contents:\n{source_code}"
     )
-    return ask_agent(AUDITOR_PROMPT, prompt, strip_fences=False)
+    role = AUDITOR_PROMPT
+    if findings:
+        prompt += f"\n\nSCANNER FINDINGS ({len(findings)}):\n{findings_prompt_block(findings)}"
+        role = AUDITOR_PROMPT + SCANNER_TRIAGE_PROMPT
+    with use_heavy_models(is_large_file(source_code)):
+        return ask_agent(role, prompt, strip_fences=False)
+
+FLOW_VERIFIER_PROMPT = """
+You are an application security reviewer verifying a data-flow (taint) finding from a static analyzer.
+You get the path the analyzer followed (source -> calls -> sink) and the code around every step.
+Decide whether attacker-controlled data can really reach the sink in a dangerous form.
+- "confirmed": the data reaches the sink unvalidated/unescaped in a way that is exploitable.
+- "false_positive": the path is impossible, the value is validated, cast, escaped, parameterized, or not
+  attacker-controlled (e.g. the analyzer matched the wrong function by name).
+- "needs_context": it depends on code or configuration you cannot see.
+Reply with JSON only: {"verdict": "confirmed" | "false_positive" | "needs_context", "reason": "<one sentence>"}
+"""
+
+
+def _code_window(files: dict[str, str | bytes], path: str, line: int, radius: int = 6) -> str:
+    content = files.get(path)
+    if content is None:
+        return "(file not available)"
+    text = content.decode("utf-8", "replace") if isinstance(content, bytes) else content
+    lines = text.splitlines()
+    lo, hi = max(1, line - radius), min(len(lines), line + radius)
+    return "\n".join(f"{n:>5}{'>' if n == line else ' '} {lines[n - 1]}" for n in range(lo, hi + 1))
+
+
+def verify_flows(findings: list, files: dict[str, str | bytes], max_items: int = 15, status_callback=None) -> list:
+    """Asks the model to confirm or reject data-flow findings (those with a trace), most severe first.
+
+    Returns the full list with `verdict` filled in for the checked ones; a false positive is lowered to "info"
+    so it drops out of the default view and the must-fix list."""
+    from scanners import SEVERITY_RANK, Finding
+    candidates = sorted((f for f in findings if f.trace and not f.verdict),
+                        key=lambda f: SEVERITY_RANK.get(f.severity, 9))[:max_items]
+    updated = {}
+    for i, f in enumerate(candidates, 1):
+        if status_callback:
+            status_callback(f"Verifying {i}/{len(candidates)}: {f.location}")
+        steps = []
+        for step in f.trace:
+            m = re.match(r"(.+?):(\d+) (.*)", step)
+            if m:
+                steps.append(f"### {step}\n{_code_window(files, m.group(1), int(m.group(2)))}")
+        prompt = (f"Finding: {f.rule_id} ({', '.join(f.cwe)}) — {f.message}\n\n"
+                  f"Path:\n" + "\n".join(f"{n}. {s}" for n, s in enumerate(f.trace, 1)) + "\n\n" + "\n\n".join(steps))
+        try:
+            raw = ask_agent(FLOW_VERIFIER_PROMPT, prompt, strip_fences=False, json_mode=True)
+            data = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
+            verdict = str(data.get("verdict", "needs_context")).strip().lower()
+            if verdict not in ("confirmed", "false_positive", "needs_context"):
+                verdict = "needs_context"
+            reason = str(data.get("reason", ""))[:300]
+        except Exception as e:  # one bad answer must not stop the batch
+            verdict, reason = "needs_context", f"verification failed: {type(e).__name__}"
+        changes = {"verdict": f"{verdict}: {reason}"}
+        if verdict == "false_positive":
+            changes["severity"] = "info"
+        updated[id(f)] = Finding(**{**f.__dict__, **changes})
+    return [updated.get(id(f), f) for f in findings]
+
 
 def optimize_single_file(
+    filename: str,
+    original_code: str,
+    audit_report: str,
+    extra_goals: str = "",
+    max_iterations: int | None = None,
+    *args,
+    **kwargs,
+) -> dict:
+    """Size-aware entry point. Files with >= LARGE_FILE_LINES lines use HEAVY_OPTIMIZER_MODELS first and get
+    LARGE_FILE_MAX_ITERATIONS coder attempts (unless the caller passes max_iterations). Everything else is
+    unchanged — see _optimize_single_file for the pipeline itself."""
+    large = is_large_file(original_code)
+    if max_iterations is None:
+        max_iterations = LARGE_FILE_MAX_ITERATIONS if large else DEFAULT_MAX_ITERATIONS
+    with use_heavy_models(large):
+        if large and kwargs.get("status_callback"):
+            kwargs["status_callback"](
+                f"Large file ({original_code.count(chr(10)) + 1} lines): using {', '.join(HEAVY_OPTIMIZER_MODELS)} "
+                f"first, up to {max_iterations} iterations.")
+        return _optimize_single_file(filename, original_code, audit_report, extra_goals, max_iterations,
+                                     *args, **kwargs)
+
+
+def _optimize_single_file(
     filename: str,
     original_code: str,
     audit_report: str,
@@ -759,8 +1037,14 @@ def optimize_single_file(
     target_rel_path: str | None = None,
     status_callback=None,
     progress_callback=None,
+    findings: list | None = None,
+    must_fix: list | None = None,
 ) -> dict:
-    """Runs Phase 2: Baselined Regression + Requirement Tests -> Coder -> AST Gate -> Reviewer.
+    """Runs Phase 2: Baselined Regression + Requirement Tests -> Coder -> AST Gate -> Scanner re-check -> Reviewer.
+
+    findings: scanners.Finding objects for this file. When given, every candidate that passes the tests is re-scanned;
+    it is sent back to the Coder if a must_fix finding is still there or a new medium+ finding appeared.
+    must_fix defaults to scanners.default_must_fix(findings) (high/critical, not in test code).
 
     progress_callback(stage, state, detail) receives structured events for a UI stepper:
     stage is one of PIPELINE_STAGES' ids (plus "iteration", whose detail is "n/max"),
@@ -809,7 +1093,7 @@ def optimize_single_file(
             reg_test_path = (Path(rel_target).parent / reg_name).as_posix()
             req_test_path = (Path(rel_target).parent / req_name).as_posix()
         else:
-            reg_test_path, reg_test_path = reg_name, reg_name
+            reg_test_path, req_test_path = reg_name, req_name
 
         # 1. Generate and baseline regression tests against the ORIGINAL file
         log(f"Generating & baselining regression tests (`{reg_test_path}`) against original file...")
@@ -869,6 +1153,13 @@ def optimize_single_file(
     feedback = "Implement concrete security, performance, and reliability improvements from the Audit Report."
     history_logs = []
     last_tier = "none"
+    scan_check = None
+    if findings:
+        must_fix = default_must_fix(findings) if must_fix is None else list(must_fix)
+        if must_fix:
+            extra_goals = (extra_goals + "\n\n" if extra_goals else "") + (
+                "SCANNER FINDINGS THAT MUST BE GONE (the scanners re-run on your output):\n"
+                + findings_prompt_block(must_fix))
 
     for attempt in range(1, max_iterations + 1):
         log(f"Iteration {attempt}/{max_iterations}: Coder refactoring `{rel_target}` ({lang_name})...")
@@ -919,6 +1210,29 @@ def optimize_single_file(
             continue
         progress("verify", "passed", f"Tier: {tier}")
 
+        scan_note = ""
+        if findings:
+            log(f"Iteration {attempt}/{max_iterations}: Re-running scanners on the new `{rel_target}`...")
+            progress("rescan", "running", "Re-running scanners")
+            try:
+                scan_check = recheck_file(rel_target, current_code, findings, must_fix, original_code=original_code,
+                                          project_files=base_files)
+            except Exception as e:  # a scanner problem must not lose a verified candidate
+                scan_check = {"status": "unavailable", "detail": f"{type(e).__name__}: {e}"}
+            summary = recheck_summary(scan_check)
+            if scan_check["status"] != "ok":
+                progress("rescan", "skipped", summary)
+            elif not scan_check["passed"]:
+                history_logs.append(f"❌ Iteration {attempt}: Scanner re-check failed — {summary}.")
+                progress("rescan", "failed", summary)
+                feedback = recheck_feedback(scan_check)
+                continue
+            else:
+                progress("rescan", "passed", summary)
+            scan_note = f"\n\nScanner re-check: {summary}"
+        else:
+            progress("rescan", "skipped", "No scanner findings to re-check")
+
         log(f"Iteration {attempt}/{max_iterations}: Reviewer auditing `{rel_target}`...")
         progress("review", "running", f"Iteration {attempt}")
         review_task = (
@@ -928,7 +1242,7 @@ def optimize_single_file(
             f"Original File:\n{original_code}\n\n"
             f"Refactored File:\n{current_code}\n\n"
             f"Audit Report:\n{audit_report}\n\n"
-            f"Verification Output:\n{verify_output}"
+            f"Verification Output:\n{verify_output}{scan_note}"
         )
 
         raw_verdict = ask_agent(REVIEWER_PROMPT, review_task, strip_fences=False, json_mode=True)
@@ -956,6 +1270,7 @@ def optimize_single_file(
                 "test_code": combined_tests,
                 "diff": diff_text,
                 "logs": history_logs,
+                "scan_check": scan_check,
             }
 
         history_logs.append(f"⚠️ Iteration {attempt} [{tier}]: Reviewer rejected — {reason}")
@@ -980,6 +1295,7 @@ def optimize_single_file(
         "test_code": combined_tests,
         "diff": diff_text,
         "logs": history_logs,
+        "scan_check": scan_check,
     }
 
 
@@ -991,6 +1307,7 @@ PIPELINE_STAGES = (
     ("gate", "Interface gate"),
     ("regression", "Regression check"),
     ("verify", "Verification"),
+    ("rescan", "Scanner re-check"),
     ("review", "Reviewer"),
 )
 
@@ -1019,6 +1336,8 @@ def handle_code_followup(
     project_context_files: dict[str, str] | None = None,
     target_rel_path: str | None = None,
     progress_callback=None,
+    findings: list | None = None,
+    must_fix: list | None = None,
 ) -> dict:
     """Answers a pure question about the optimized code OR triggers a targeted re-optimization loop.
 
@@ -1054,6 +1373,8 @@ def handle_code_followup(
         target_rel_path=target_rel_path,
         status_callback=status_callback,
         progress_callback=progress_callback,
+        findings=findings,
+        must_fix=must_fix,
     )
 
     cumulative_diff = "".join(

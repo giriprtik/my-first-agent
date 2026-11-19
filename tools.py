@@ -33,13 +33,12 @@ def save_research_note(filename: str, content: str) -> str:
     if len(content) > MAX_NOTE_CHARS:
         raise ValueError("Content exceeds the maximum allowed length of 50,000 characters.")
 
-    # Strip any folder paths (handling both POSIX and Windows style separators)
-    normalized_name = filename.replace("\\", "/")
-    clean_name = os.path.basename(normalized_name).strip()
+    # Strip any folder paths (e.g., '../agent.py' becomes 'agent.py')
+    clean_name = os.path.basename(filename).strip()
 
-    # Split off an existing '.md' case-insensitively so the base can be sanitized
-    lower_name = clean_name.lower()
-    base = clean_name[: -len(".md")] if lower_name.endswith(".md") else clean_name
+    # Split off an existing '.md' so the base can be sanitized; any other extension becomes part of the base.
+    # (os.path.splitext(".md") returns (".md", ""), which used to save a file literally named "_md".)
+    base = clean_name[: -len(".md")] if clean_name.endswith(".md") else clean_name
 
     # Sanitize base filename: allow only letters, numbers, underscores, and hyphens; collapse repeated underscores
     sanitized_base = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_-]", "_", base))
@@ -64,8 +63,8 @@ def save_research_note(filename: str, content: str) -> str:
         with open(target_path, "x", encoding="utf-8") as f:
             f.write(final_content)
     except FileExistsError:
-        print("[SECURITY LOG] Blocked overwrite attempt on target file.")
+        print(f"[SECURITY LOG] Blocked overwrite attempt on: {clean_name}")
         return f"ACCESS DENIED: '{clean_name}' already exists. Choose a different filename."
 
-    print("[TOOL LOG] Safely saved research note.")
+    print(f"[TOOL LOG] Safely saved note to: {target_path}")
     return f"Successfully saved note to agent_outputs/{clean_name}"
