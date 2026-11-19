@@ -1,0 +1,8 @@
+# Optional scanners used by scanners.py (versions the test fixtures were captured with).
+# Install with: pip install -r tools/requirements-scanners.txt
+semgrep==1.186.0
+bandit[sarif]==1.9.4
+ruff==0.17.5
+mypy==2.4.1
+# Non-Python tools: gitleaks, osv-scanner (brew or GitHub releases), PMD 7.29 (needs Java),
+# and ESLint/TypeScript: Node.js 18+, then `cd tools/eslint && npm ci`.

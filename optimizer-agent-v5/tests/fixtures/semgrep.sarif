@@ -1,0 +1,645 @@
+{
+ "version": "2.1.0",
+ "runs": [
+  {
+   "invocations": [
+    {
+     "executionSuccessful": true,
+     "toolExecutionNotifications": []
+    }
+   ],
+   "results": [
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "src/main/java/app/Repo.java",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 73,
+         "endLine": 6,
+         "snippet": {
+          "text": "    return s.executeQuery(\"SELECT * FROM users WHERE id = '\" + id + \"'\");"
+         },
+         "startColumn": 5,
+         "startLine": 6
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.java.lang.security.audit.sqli.jdbc-sqli"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "src/main/java/app/Repo.java",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 73,
+         "endLine": 6,
+         "snippet": {
+          "text": "    return s.executeQuery(\"SELECT * FROM users WHERE id = '\" + id + \"'\");"
+         },
+         "startColumn": 12,
+         "startLine": 6
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.java.lang.security.audit.formatted-sql-string"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "src/web/page.js",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 50,
+         "endLine": 4,
+         "snippet": {
+          "text": "  document.getElementById(\"out\").innerHTML = msg;"
+         },
+         "startColumn": 3,
+         "startLine": 4
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "User controlled data in methods like `innerHTML`, `outerHTML` or `document.write` is an anti-pattern that can lead to XSS vulnerabilities"
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.javascript.browser.security.insecure-document-method"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "src/web/page.js",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 50,
+         "endLine": 4,
+         "snippet": {
+          "text": "  document.getElementById(\"out\").innerHTML = msg;"
+         },
+         "startColumn": 3,
+         "startLine": 4
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "User controlled data in a `document.getElementById(\"out\").innerHTML` is an anti-pattern that can lead to XSS vulnerabilities"
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.javascript.browser.security.insecure-innerhtml"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "src/web/page.js",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 12,
+         "endLine": 5,
+         "snippet": {
+          "text": "  eval(msg);"
+         },
+         "startColumn": 3,
+         "startLine": 5
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.javascript.browser.security.eval-detected"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "vuln.py",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 55,
+         "endLine": 5,
+         "snippet": {
+          "text": "    c.execute(\"select * from t where n = '%s'\" % name)"
+         },
+         "startColumn": 5,
+         "startLine": 5
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Detected possible formatted SQL query. Use parameterized queries instead."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.python.lang.security.audit.formatted-sql-query"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "vuln.py",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 55,
+         "endLine": 5,
+         "snippet": {
+          "text": "    c.execute(\"select * from t where n = '%s'\" % name)"
+         },
+         "startColumn": 5,
+         "startLine": 5
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection. In order to execute raw query safely, prepared statement should be used. SQLAlchemy provides TextualSQL to easily used prepared statement with named parameters. For complex SQL composition, use SQL Expression Language or Schema Definition Language. In most cases, SQLAlchemy ORM will be a better option."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.python.sqlalchemy.security.sqlalchemy-execute-raw-query"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "vuln.py",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 46,
+         "endLine": 6,
+         "snippet": {
+          "text": "    subprocess.call(\"ls \" + name, shell=True)"
+         },
+         "startColumn": 5,
+         "startLine": 6
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Detected subprocess function 'call' without a static string. If this data can be controlled by a malicious actor, it may be an instance of command injection. Audit the use of this call to ensure it is not controllable by an external resource. You may consider using 'shlex.escape()'."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.python.lang.security.audit.dangerous-subprocess-use-audit"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "vuln.py",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 20,
+         "endLine": 6,
+         "snippet": {
+          "text": "    subprocess.call(\"ls \" + name, shell=True)"
+         },
+         "startColumn": 16,
+         "startLine": 6
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "This is not checking the return value of this subprocess call; if it fails no exception will be raised. Consider subprocess.check_call() instead"
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.python.lang.correctness.unchecked-subprocess-call"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "vuln.py",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 45,
+         "endLine": 6,
+         "snippet": {
+          "text": "    subprocess.call(\"ls \" + name, shell=True)"
+         },
+         "startColumn": 41,
+         "startLine": 6
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Found 'subprocess' function 'call' with 'shell=True'. This is dangerous because this call will spawn the command using a shell process. Doing so propagates current shell settings and variables, which makes it much easier for a malicious actor to execute commands. Use 'shell=False' instead."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.python.lang.security.audit.subprocess-shell-true"
+    },
+    {
+     "fingerprints": {
+      "matchBasedId/v1": "requires login"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "vuln.py",
+         "uriBaseId": "%SRCROOT%"
+        },
+        "region": {
+         "endColumn": 39,
+         "endLine": 7,
+         "snippet": {
+          "text": "    return pickle.loads(name.encode())"
+         },
+         "startColumn": 12,
+         "startLine": 7
+        }
+       }
+      }
+     ],
+     "message": {
+      "text": "Avoid using `pickle`, which is known to lead to code execution vulnerabilities. When unpickling, the serialized data could be manipulated to run arbitrary code. Instead, consider serializing the relevant data as JSON or a similar text-based serialization format."
+     },
+     "properties": {},
+     "ruleId": "home.dev.semgrep-rules.python.lang.security.deserialization.avoid-pickle"
+    }
+   ],
+   "tool": {
+    "driver": {
+     "name": "Semgrep OSS",
+     "rules": [
+      {
+       "defaultConfiguration": {
+        "level": "error"
+       },
+       "fullDescription": {
+        "text": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'."
+       },
+       "help": {
+        "markdown": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'.\n\n<b>References:</b>\n - [Semgrep Rule](https://find-sec-bugs.github.io/bugs.htm#SQL_INJECTION)\n - [https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html](https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html)\n - [https://docs.oracle.com/javase/tutorial/jdbc/basics/prepared.html#create_ps](https://docs.oracle.com/javase/tutorial/jdbc/basics/prepared.html#create_ps)\n - [https://software-security.sans.org/developer-how-to/fix-sql-injection-in-java-using-prepared-callable-statement](https://software-security.sans.org/developer-how-to/fix-sql-injection-in-java-using-prepared-callable-statement)\n",
+        "text": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'."
+       },
+       "helpUri": "https://find-sec-bugs.github.io/bugs.htm#SQL_INJECTION",
+       "id": "home.dev.semgrep-rules.java.lang.security.audit.formatted-sql-string",
+       "name": "home.dev.semgrep-rules.java.lang.security.audit.formatted-sql-string",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+         "MEDIUM CONFIDENCE",
+         "OWASP-A01:2017 - Injection",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.java.lang.security.audit.formatted-sql-string"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "warning"
+       },
+       "fullDescription": {
+        "text": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'."
+       },
+       "help": {
+        "markdown": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'.\n\n<b>References:</b>\n - [https://owasp.org/Top10/A03_2021-Injection](https://owasp.org/Top10/A03_2021-Injection)\n",
+        "text": "Detected a formatted string in a SQL statement. This could lead to SQL injection if variables in the SQL statement are not properly sanitized. Use a prepared statements (java.sql.PreparedStatement) instead. You can obtain a PreparedStatement using 'connection.prepareStatement'."
+       },
+       "id": "home.dev.semgrep-rules.java.lang.security.audit.sqli.jdbc-sqli",
+       "name": "home.dev.semgrep-rules.java.lang.security.audit.sqli.jdbc-sqli",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+         "LOW CONFIDENCE",
+         "OWASP-A01:2017 - Injection",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.java.lang.security.audit.sqli.jdbc-sqli"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "warning"
+       },
+       "fullDescription": {
+        "text": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources."
+       },
+       "help": {
+        "markdown": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources.\n\n<b>References:</b>\n - [https://owasp.org/Top10/A03_2021-Injection](https://owasp.org/Top10/A03_2021-Injection)\n",
+        "text": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources."
+       },
+       "id": "home.dev.semgrep-rules.javascript.browser.security.eval-detected",
+       "name": "home.dev.semgrep-rules.javascript.browser.security.eval-detected",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')",
+         "LOW CONFIDENCE",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.javascript.browser.security.eval-detected"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "error"
+       },
+       "fullDescription": {
+        "text": "User controlled data in methods like `innerHTML`, `outerHTML` or `document.write` is an anti-pattern that can lead to XSS vulnerabilities"
+       },
+       "help": {
+        "markdown": "User controlled data in methods like `innerHTML`, `outerHTML` or `document.write` is an anti-pattern that can lead to XSS vulnerabilities\n\n<b>References:</b>\n - [https://owasp.org/Top10/A03_2021-Injection](https://owasp.org/Top10/A03_2021-Injection)\n",
+        "text": "User controlled data in methods like `innerHTML`, `outerHTML` or `document.write` is an anti-pattern that can lead to XSS vulnerabilities"
+       },
+       "id": "home.dev.semgrep-rules.javascript.browser.security.insecure-document-method",
+       "name": "home.dev.semgrep-rules.javascript.browser.security.insecure-document-method",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+         "LOW CONFIDENCE",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "OWASP-A07:2017 - Cross-Site Scripting (XSS)",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.javascript.browser.security.insecure-document-method"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "error"
+       },
+       "fullDescription": {
+        "text": "User controlled data in a `$EL.innerHTML` is an anti-pattern that can lead to XSS vulnerabilities"
+       },
+       "help": {
+        "markdown": "User controlled data in a `$EL.innerHTML` is an anti-pattern that can lead to XSS vulnerabilities\n\n<b>References:</b>\n - [https://owasp.org/Top10/A03_2021-Injection](https://owasp.org/Top10/A03_2021-Injection)\n",
+        "text": "User controlled data in a `$EL.innerHTML` is an anti-pattern that can lead to XSS vulnerabilities"
+       },
+       "id": "home.dev.semgrep-rules.javascript.browser.security.insecure-innerhtml",
+       "name": "home.dev.semgrep-rules.javascript.browser.security.insecure-innerhtml",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+         "LOW CONFIDENCE",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "OWASP-A07:2017 - Cross-Site Scripting (XSS)",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.javascript.browser.security.insecure-innerhtml"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "warning"
+       },
+       "fullDescription": {
+        "text": "This is not checking the return value of this subprocess call; if it fails no exception will be raised. Consider subprocess.check_call() instead"
+       },
+       "help": {
+        "markdown": "This is not checking the return value of this subprocess call; if it fails no exception will be raised. Consider subprocess.check_call() instead\n\n<b>References:</b>\n - [https://docs.python.org/3/library/subprocess.html#subprocess.check_call](https://docs.python.org/3/library/subprocess.html#subprocess.check_call)\n",
+        "text": "This is not checking the return value of this subprocess call; if it fails no exception will be raised. Consider subprocess.check_call() instead"
+       },
+       "id": "home.dev.semgrep-rules.python.lang.correctness.unchecked-subprocess-call",
+       "name": "home.dev.semgrep-rules.python.lang.correctness.unchecked-subprocess-call",
+       "properties": {
+        "precision": "very-high",
+        "tags": []
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.python.lang.correctness.unchecked-subprocess-call"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "error"
+       },
+       "fullDescription": {
+        "text": "Detected subprocess function '$FUNC' without a static string. If this data can be controlled by a malicious actor, it may be an instance of command injection. Audit the use of this call to ensure it is not controllable by an external resource. You may consider using 'shlex.escape()'."
+       },
+       "help": {
+        "markdown": "Detected subprocess function '$FUNC' without a static string. If this data can be controlled by a malicious actor, it may be an instance of command injection. Audit the use of this call to ensure it is not controllable by an external resource. You may consider using 'shlex.escape()'.\n\n<b>References:</b>\n - [https://stackoverflow.com/questions/3172470/actual-meaning-of-shell-true-in-subprocess](https://stackoverflow.com/questions/3172470/actual-meaning-of-shell-true-in-subprocess)\n - [https://docs.python.org/3/library/subprocess.html](https://docs.python.org/3/library/subprocess.html)\n - [https://docs.python.org/3/library/shlex.html](https://docs.python.org/3/library/shlex.html)\n - [https://semgrep.dev/docs/cheat-sheets/python-command-injection/](https://semgrep.dev/docs/cheat-sheets/python-command-injection/)\n",
+        "text": "Detected subprocess function '$FUNC' without a static string. If this data can be controlled by a malicious actor, it may be an instance of command injection. Audit the use of this call to ensure it is not controllable by an external resource. You may consider using 'shlex.escape()'."
+       },
+       "id": "home.dev.semgrep-rules.python.lang.security.audit.dangerous-subprocess-use-audit",
+       "name": "home.dev.semgrep-rules.python.lang.security.audit.dangerous-subprocess-use-audit",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')",
+         "LOW CONFIDENCE",
+         "OWASP-A01:2017 - Injection",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.python.lang.security.audit.dangerous-subprocess-use-audit"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "warning"
+       },
+       "fullDescription": {
+        "text": "Detected possible formatted SQL query. Use parameterized queries instead."
+       },
+       "help": {
+        "markdown": "Detected possible formatted SQL query. Use parameterized queries instead.\n\n<b>References:</b>\n - [https://stackoverflow.com/questions/775296/mysql-parameterized-queries](https://stackoverflow.com/questions/775296/mysql-parameterized-queries)\n",
+        "text": "Detected possible formatted SQL query. Use parameterized queries instead."
+       },
+       "id": "home.dev.semgrep-rules.python.lang.security.audit.formatted-sql-query",
+       "name": "home.dev.semgrep-rules.python.lang.security.audit.formatted-sql-query",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+         "LOW CONFIDENCE",
+         "OWASP-A01:2017 - Injection",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.python.lang.security.audit.formatted-sql-query"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "error"
+       },
+       "fullDescription": {
+        "text": "Found 'subprocess' function '$FUNC' with 'shell=True'. This is dangerous because this call will spawn the command using a shell process. Doing so propagates current shell settings and variables, which makes it much easier for a malicious actor to execute commands. Use 'shell=False' instead."
+       },
+       "help": {
+        "markdown": "Found 'subprocess' function '$FUNC' with 'shell=True'. This is dangerous because this call will spawn the command using a shell process. Doing so propagates current shell settings and variables, which makes it much easier for a malicious actor to execute commands. Use 'shell=False' instead.\n\n<b>References:</b>\n - [Semgrep Rule](https://bandit.readthedocs.io/en/latest/plugins/b602_subprocess_popen_with_shell_equals_true.html)\n - [https://stackoverflow.com/questions/3172470/actual-meaning-of-shell-true-in-subprocess](https://stackoverflow.com/questions/3172470/actual-meaning-of-shell-true-in-subprocess)\n - [https://docs.python.org/3/library/subprocess.html](https://docs.python.org/3/library/subprocess.html)\n",
+        "text": "Found 'subprocess' function '$FUNC' with 'shell=True'. This is dangerous because this call will spawn the command using a shell process. Doing so propagates current shell settings and variables, which makes it much easier for a malicious actor to execute commands. Use 'shell=False' instead."
+       },
+       "helpUri": "https://bandit.readthedocs.io/en/latest/plugins/b602_subprocess_popen_with_shell_equals_true.html",
+       "id": "home.dev.semgrep-rules.python.lang.security.audit.subprocess-shell-true",
+       "name": "home.dev.semgrep-rules.python.lang.security.audit.subprocess-shell-true",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')",
+         "MEDIUM CONFIDENCE",
+         "OWASP-A01:2017 - Injection",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.python.lang.security.audit.subprocess-shell-true"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "warning"
+       },
+       "fullDescription": {
+        "text": "Avoid using `pickle`, which is known to lead to code execution vulnerabilities. When unpickling, the serialized data could be manipulated to run arbitrary code. Instead, consider serializing the relevant data as JSON or a similar text-based serialization format."
+       },
+       "help": {
+        "markdown": "Avoid using `pickle`, which is known to lead to code execution vulnerabilities. When unpickling, the serialized data could be manipulated to run arbitrary code. Instead, consider serializing the relevant data as JSON or a similar text-based serialization format.\n\n<b>References:</b>\n - [https://docs.python.org/3/library/pickle.html](https://docs.python.org/3/library/pickle.html)\n",
+        "text": "Avoid using `pickle`, which is known to lead to code execution vulnerabilities. When unpickling, the serialized data could be manipulated to run arbitrary code. Instead, consider serializing the relevant data as JSON or a similar text-based serialization format."
+       },
+       "id": "home.dev.semgrep-rules.python.lang.security.deserialization.avoid-pickle",
+       "name": "home.dev.semgrep-rules.python.lang.security.deserialization.avoid-pickle",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-502: Deserialization of Untrusted Data",
+         "LOW CONFIDENCE",
+         "OWASP-A08:2017 - Insecure Deserialization",
+         "OWASP-A08:2021 - Software and Data Integrity Failures",
+         "OWASP-A08:2025 - Software or Data Integrity Failures",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.python.lang.security.deserialization.avoid-pickle"
+       }
+      },
+      {
+       "defaultConfiguration": {
+        "level": "error"
+       },
+       "fullDescription": {
+        "text": "Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection. In order to execute raw query safely, prepared statement should be used. SQLAlchemy provides TextualSQL to easily used prepared statement with named parameters. For complex SQL composition, use SQL Expression Language or Schema Definition Language. In most cases, SQLAlchemy ORM will be a better option."
+       },
+       "help": {
+        "markdown": "Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection. In order to execute raw query safely, prepared statement should be used. SQLAlchemy provides TextualSQL to easily used prepared statement with named parameters. For complex SQL composition, use SQL Expression Language or Schema Definition Language. In most cases, SQLAlchemy ORM will be a better option.\n\n<b>References:</b>\n - [https://docs.sqlalchemy.org/en/14/core/tutorial.html#using-textual-sql](https://docs.sqlalchemy.org/en/14/core/tutorial.html#using-textual-sql)\n - [https://www.tutorialspoint.com/sqlalchemy/sqlalchemy_quick_guide.htm](https://www.tutorialspoint.com/sqlalchemy/sqlalchemy_quick_guide.htm)\n - [https://docs.sqlalchemy.org/en/14/core/tutorial.html#using-more-specific-text-with-table-expression-literal-column-and-expression-column](https://docs.sqlalchemy.org/en/14/core/tutorial.html#using-more-specific-text-with-table-expression-literal-column-and-expression-column)\n",
+        "text": "Avoiding SQL string concatenation: untrusted input concatenated with raw SQL query can result in SQL Injection. In order to execute raw query safely, prepared statement should be used. SQLAlchemy provides TextualSQL to easily used prepared statement with named parameters. For complex SQL composition, use SQL Expression Language or Schema Definition Language. In most cases, SQLAlchemy ORM will be a better option."
+       },
+       "id": "home.dev.semgrep-rules.python.sqlalchemy.security.sqlalchemy-execute-raw-query",
+       "name": "home.dev.semgrep-rules.python.sqlalchemy.security.sqlalchemy-execute-raw-query",
+       "properties": {
+        "precision": "very-high",
+        "tags": [
+         "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+         "LOW CONFIDENCE",
+         "OWASP-A01:2017 - Injection",
+         "OWASP-A03:2021 - Injection",
+         "OWASP-A05:2025 - Injection",
+         "security"
+        ]
+       },
+       "shortDescription": {
+        "text": "Semgrep Finding: home.dev.semgrep-rules.python.sqlalchemy.security.sqlalchemy-execute-raw-query"
+       }
+      }
+     ],
+     "semanticVersion": "1.186.0"
+    }
+   }
+  }
+ ],
+ "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json"
+}

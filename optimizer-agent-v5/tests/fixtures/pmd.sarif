@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "PMD",
+          "version": "7.29.0",
+          "informationUri": "https://docs.pmd-code.org/latest/",
+          "rules": [
+            {
+              "id": "CloseResource",
+              "shortDescription": {
+                "text": "Ensure that resources like this Statement object are closed after use"
+              },
+              "fullDescription": {
+                "text": "\nEnsure that resources (like `java.sql.Connection`, `java.sql.Statement`, and `java.sql.ResultSet` objects\nand any subtype of `java.lang.AutoCloseable`) are always closed after use.\nFailing to do so might result in resource leaks.\n\nNote: It suffices to configure the super type, e.g. `java.lang.AutoCloseable`, so that this rule automatically triggers\non any subtype (e.g. `java.io.FileInputStream`). Additionally specifying `java.sql.Connection` helps in detecting\nthe types, if the type resolution / auxclasspath is not correctly setup.\n\nNote: Since PMD 6.16.0 the default value for the property `types` contains `java.lang.AutoCloseable` and detects\nnow cases where the standard `java.io.*Stream` classes are involved. In order to restore the old behaviour,\njust remove \"AutoCloseable\" from the types.\n\nThe property `allowedResourceMethodPatterns` can be used to specify method invocation patterns that return\nresources which are managed externally and don't need to be closed by the caller. This is useful for\nservlet-related streams like `HttpServletRequest.getReader()` or `HttpServletResponse.getWriter()`,\nwhich are managed by the servlet container, and for mocking frameworks, whose mocks are not real\nresources even when the mocked type implements `java.lang.AutoCloseable`. The patterns use\nInvocationMatcher syntax (e.g., `javax.servlet.ServletRequest#getReader()`).\n\nThe defaults cover the servlet API and Mockito's `mock()`. Mocks created by other frameworks\ncan be allowed by adding their factory methods, for example `org.easymock.EasyMock#createMock(_*)`,\n`org.jmock.Mockery#mock(_*)` or `mockit.Mocked#new(_*)`.\n\nNote that `Mockito.spy()` and `Mockito.mockStatic()` are intentionally not among the defaults.\nA spy calls through to the real object by default, so either the spy or the object it wraps still\nhas to be closed; `mockStatic()` returns a `MockedStatic`, which has to be closed as well. A violation\nin either case is a true positive.\n        "
+              },
+              "helpUri": "https://docs.pmd-code.org/snapshot/pmd_rules_java_errorprone.html#closeresource",
+              "help": {
+                "text": "\nEnsure that resources (like `java.sql.Connection`, `java.sql.Statement`, and `java.sql.ResultSet` objects\nand any subtype of `java.lang.AutoCloseable`) are always closed after use.\nFailing to do so might result in resource leaks.\n\nNote: It suffices to configure the super type, e.g. `java.lang.AutoCloseable`, so that this rule automatically triggers\non any subtype (e.g. `java.io.FileInputStream`). Additionally specifying `java.sql.Connection` helps in detecting\nthe types, if the type resolution / auxclasspath is not correctly setup.\n\nNote: Since PMD 6.16.0 the default value for the property `types` contains `java.lang.AutoCloseable` and detects\nnow cases where the standard `java.io.*Stream` classes are involved. In order to restore the old behaviour,\njust remove \"AutoCloseable\" from the types.\n\nThe property `allowedResourceMethodPatterns` can be used to specify method invocation patterns that return\nresources which are managed externally and don't need to be closed by the caller. This is useful for\nservlet-related streams like `HttpServletRequest.getReader()` or `HttpServletResponse.getWriter()`,\nwhich are managed by the servlet container, and for mocking frameworks, whose mocks are not real\nresources even when the mocked type implements `java.lang.AutoCloseable`. The patterns use\nInvocationMatcher syntax (e.g., `javax.servlet.ServletRequest#getReader()`).\n\nThe defaults cover the servlet API and Mockito's `mock()`. Mocks created by other frameworks\ncan be allowed by adding their factory methods, for example `org.easymock.EasyMock#createMock(_*)`,\n`org.jmock.Mockery#mock(_*)` or `mockit.Mocked#new(_*)`.\n\nNote that `Mockito.spy()` and `Mockito.mockStatic()` are intentionally not among the defaults.\nA spy calls through to the real object by default, so either the spy or the object it wraps still\nhas to be closed; `mockStatic()` returns a `MockedStatic`, which has to be closed as well. A violation\nin either case is a true positive.\n        "
+              },
+              "properties": {
+                "ruleset": "Error Prone",
+                "priority": 3,
+                "tags": [
+                  "Error Prone"
+                ]
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CloseResource",
+          "ruleIndex": 0,
+          "message": {
+            "text": "Ensure that resources like this Statement object are closed after use"
+          },
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///work/proj/src/main/java/app/Repo.java"
+                },
+                "region": {
+                  "startLine": 5,
+                  "startColumn": 15,
+                  "endLine": 5,
+                  "endColumn": 16
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "toolConfigurationNotifications": [],
+          "toolExecutionNotifications": []
+        }
+      ]
+    }
+  ]
+}

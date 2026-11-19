@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "results": [
+        {
+          "fixes": [
+            {
+              "artifactChanges": [
+                {
+                  "artifactLocation": {
+                    "uri": "file:///work/proj/typed.py"
+                  },
+                  "replacements": [
+                    {
+                      "deletedRegion": {
+                        "endColumn": 30,
+                        "endLine": 4,
+                        "startColumn": 17,
+                        "startLine": 4
+                      },
+                      "insertedContent": {
+                        "text": "str | None"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "description": {
+                "text": "Convert to `X | None`"
+              }
+            }
+          ],
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///work/proj/typed.py"
+                },
+                "region": {
+                  "endColumn": 30,
+                  "endLine": 4,
+                  "startColumn": 17,
+                  "startLine": 4
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Use `X | None` for type annotations"
+          },
+          "ruleId": "UP045"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///work/proj/typed.py"
+                },
+                "region": {
+                  "endColumn": 36,
+                  "endLine": 9,
+                  "startColumn": 22,
+                  "startLine": 9
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Undefined name `undefined_name`"
+          },
+          "ruleId": "F821"
+        },
+        {
+          "fixes": [
+            {
+              "artifactChanges": [
+                {
+                  "artifactLocation": {
+                    "uri": "file:///work/proj/vuln.py"
+                  },
+                  "replacements": [
+                    {
+                      "deletedRegion": {
+                        "endColumn": 41,
+                        "endLine": 1,
+                        "startColumn": 1,
+                        "startLine": 1
+                      },
+                      "insertedContent": {
+                        "text": "import subprocess\nimport sqlite3\nimport pickle\nimport yaml"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "description": {
+                "text": "Split imports"
+              }
+            }
+          ],
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///work/proj/vuln.py"
+                },
+                "region": {
+                  "endColumn": 41,
+                  "endLine": 1,
+                  "startColumn": 1,
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Multiple imports on one line"
+          },
+          "ruleId": "E401"
+        },
+        {
+          "fixes": [
+            {
+              "artifactChanges": [
+                {
+                  "artifactLocation": {
+                    "uri": "file:///work/proj/vuln.py"
+                  },
+                  "replacements": [
+                    {
+                      "deletedRegion": {
+                        "endColumn": 54,
+                        "endLine": 5,
+                        "startColumn": 15,
+                        "startLine": 5
+                      },
+                      "insertedContent": {
+                        "text": "\"select * from t where n = '{}'\".format(name)"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "description": {
+                "text": "Replace with format specifiers"
+              }
+            }
+          ],
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "file:///work/proj/vuln.py"
+                },
+                "region": {
+                  "endColumn": 54,
+                  "endLine": 5,
+                  "startColumn": 15,
+                  "startLine": 5
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Use format specifiers instead of percent format"
+          },
+          "ruleId": "UP031"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/astral-sh/ruff",
+          "name": "ruff",
+          "rules": [
+            {
+              "defaultConfiguration": {
+                "enabled": false,
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "## What it does\nCheck for multiple imports on one line.\n\n## Why is this bad?\nAccording to [PEP 8], \"imports should usually be on separate lines.\"\n\n## Example\n```python\nimport sys, os\n```\n\nUse instead:\n```python\nimport os\nimport sys\n```\n\n[PEP 8]: https://peps.python.org/pep-0008/#imports\n"
+              },
+              "help": {
+                "text": "Multiple imports on one line"
+              },
+              "helpUri": "https://docs.astral.sh/ruff/rules/multiple-imports-on-one-line",
+              "id": "E401",
+              "properties": {
+                "id": "E401",
+                "kind": "pycodestyle",
+                "name": "multiple-imports-on-one-line",
+                "problem.severity": "error"
+              },
+              "shortDescription": {
+                "text": "Multiple imports on one line"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "enabled": true,
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "## What it does\nChecks for uses of undefined names.\n\n## Why is this bad?\nAn undefined name is likely to raise `NameError` at runtime.\n\n## Example\n```python\ndef double():\n    return n * 2  # raises `NameError` if `n` is undefined when `double` is called\n```\n\nUse instead:\n```python\ndef double(n):\n    return n * 2\n```\n\n## Options\n- [`target-version`]: Can be used to configure which symbols Ruff will understand\n  as being available in the `builtins` namespace.\n\n## References\n- [Python documentation: Naming and binding](https://docs.python.org/3/reference/executionmodel.html#naming-and-binding)\n"
+              },
+              "help": {
+                "text": "Undefined name `{name}`. {tip}"
+              },
+              "helpUri": "https://docs.astral.sh/ruff/rules/undefined-name",
+              "id": "F821",
+              "properties": {
+                "id": "F821",
+                "kind": "Pyflakes",
+                "name": "undefined-name",
+                "problem.severity": "error"
+              },
+              "shortDescription": {
+                "text": "Undefined name `{name}`. {tip}"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "enabled": true,
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "## What it does\nChecks for `printf`-style string formatting, and offers to replace it with\n`str.format` calls.\n\n## Why is this bad?\n`printf`-style string formatting has a number of quirks, and leads to less\nreadable code than using `str.format` calls or f-strings. In general, prefer\nthe newer `str.format` and f-strings constructs over `printf`-style string\nformatting.\n\n## Example\n\n```python\n\"%s, %s\" % (\"Hello\", \"World\")  # \"Hello, World\"\n```\n\nUse instead:\n\n```python\n\"{}, {}\".format(\"Hello\", \"World\")  # \"Hello, World\"\n```\n\n```python\nf\"{'Hello'}, {'World'}\"  # \"Hello, World\"\n```\n\n## Fix safety\n\nIn cases where the format string contains a single generic format specifier\n(e.g. `%s`), and the right-hand side is an ambiguous expression,\nwe cannot offer a safe fix.\n\nFor example, given:\n\n```python\n\"%s\" % val\n```\n\n`val` could be a single-element tuple, _or_ a single value (not\ncontained in a tuple). Both of these would resolve to the same\nformatted string when using `printf`-style formatting, but\nresolve differently when using f-strings:\n\n```python\nval = 1\nprint(\"%s\" % val)  # \"1\"\nprint(\"{}\".format(val))  # \"1\"\n\nval = (1,)\nprint(\"%s\" % val)  # \"1\"\nprint(\"{}\".format(val))  # \"(1,)\"\n```\n\n## References\n- [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#old-string-formatting)\n- [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)\n"
+              },
+              "help": {
+                "text": "Use format specifiers instead of percent format"
+              },
+              "helpUri": "https://docs.astral.sh/ruff/rules/printf-string-formatting",
+              "id": "UP031",
+              "properties": {
+                "id": "UP031",
+                "kind": "pyupgrade",
+                "name": "printf-string-formatting",
+                "problem.severity": "error"
+              },
+              "shortDescription": {
+                "text": "Use format specifiers instead of percent format"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "enabled": true,
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "## What it does\nCheck for `typing.Optional` annotations that can be rewritten based on [PEP 604] syntax.\n\n## Why is this bad?\n[PEP 604] introduced a new syntax for union type annotations based on the\n`|` operator. This syntax is more concise and readable than the previous\n`typing.Optional` syntax.\n\nThis rule is enabled when targeting Python 3.10 or later (see:\n[`target-version`]). By default, it's _also_ enabled for earlier Python\nversions if `from __future__ import annotations` is present, as\n`__future__` annotations are not evaluated at runtime. If your code relies\non runtime type annotations (either directly or via a library like\nPydantic), you can disable this behavior for Python versions prior to 3.10\nby setting [`lint.pyupgrade.keep-runtime-typing`] to `true`.\n\n## Example\n```python\nfrom typing import Optional\n\nfoo: Optional[int] = None\n```\n\nUse instead:\n```python\nfoo: int | None = None\n```\n\n## Fix safety\nThis rule's fix is marked as unsafe on Python versions prior to 3.10 because\nusing the PEP-604 syntax may lead to runtime errors in libraries that rely\non runtime type annotations, like Pydantic, or in unusual and likely\nincorrect type annotations where the type does not support the `|`\noperator. The fix is also marked as unsafe when it would remove comments\npresent within the type annotation being rewritten.\n\nIn [preview], this rule can also add its own `__future__` import on Python\n3.9 and earlier, if the [`lint.future-annotations`] setting is enabled. This\nalso makes the fix unsafe.\n\n## Options\n- `target-version`\n- `lint.pyupgrade.keep-runtime-typing`\n- `lint.future-annotations`\n\n[PEP 604]: https://peps.python.org/pep-0604/\n[preview]: https://docs.astral.sh/ruff/preview/\n"
+              },
+              "help": {
+                "text": "Use `X | None` for type annotations"
+              },
+              "helpUri": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional",
+              "id": "UP045",
+              "properties": {
+                "id": "UP045",
+                "kind": "pyupgrade",
+                "name": "non-pep604-annotation-optional",
+                "problem.severity": "error"
+              },
+              "shortDescription": {
+                "text": "Use `X | None` for type annotations"
+              }
+            }
+          ],
+          "version": "0.17.5"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

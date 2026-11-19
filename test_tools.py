@@ -19,8 +19,11 @@ class TestToolsSecurity(unittest.TestCase):
     def test_blocks_path_traversal_and_sanitizes_name(self):
         result = tools.save_research_note("../../evil!@#note", "Valid research content")
         self.assertIn("Successfully saved", result)
-        saved_files = list(self.safe_path.glob("*.md"))
-        self.assertEqual(len(saved_files), 1)
+        
+        # Explicitly verify the file was isolated strictly to self.safe_path without escaping
+        expected_path = self.safe_path / "evil_note.md"
+        self.assertTrue(expected_path.is_relative_to(self.safe_path))
+        self.assertTrue(expected_path.exists())
         self.assertFalse((self.safe_path.parent / "evil!@#note.md").exists())
 
     def test_blocks_overwrite_of_existing_file(self):
@@ -33,7 +36,7 @@ class TestToolsSecurity(unittest.TestCase):
         with self.assertRaises(ValueError):
             tools.save_research_note("empty.md", "   ")
         with self.assertRaises(ValueError):
-            tools.save_research_note("huge.md", "x" * 50_001)
+            tools.save_research_note("huge.md", "x" * (tools.MAX_NOTE_CHARS + 1))
 
 
 if __name__ == "__main__":

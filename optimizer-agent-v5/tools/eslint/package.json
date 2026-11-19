@@ -1,0 +1,17 @@
+{
+  "name": "optimizer-eslint-tools",
+  "private": true,
+  "description": "ESLint + TypeScript toolchain used by scanners.py. Install once with: npm ci (or npm install)",
+  "type": "module",
+  "dependencies": {
+    "eslint": "^9.39.5",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-no-unsanitized": "^4.1.5",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-security": "^4.2.1",
+    "globals": "^17.14.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0"
+  }
+}

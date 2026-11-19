@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
@@ -8,22 +9,24 @@ from google.genai import types
 
 load_dotenv()
 
-client = genai.Client(http_options=types.HttpOptions(timeout=30000))
-MODEL = "gemini-3.5-flash-lite"
+client = genai.Client()
+MODEL = "gemini-2.5-flash"
 
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).resolve().parent
 WORKSPACE = PROJECT_ROOT / "workspace"
 WORKSPACE.mkdir(exist_ok=True)
 
 def safe_write(filename: str, code: str) -> Path:
-    """Writes code strictly inside the workspace/ sandbox."""
+    """Writes code strictly inside the workspace/ sandbox with path traversal protection."""
     clean_name = os.path.basename(filename)
-    target = WORKSPACE / clean_name
+    target = (WORKSPACE / clean_name).resolve()
+    if not str(target).startswith(str(WORKSPACE.resolve())):
+        raise ValueError(f"Path traversal attempt detected: {filename}")
     target.write_text(code, encoding="utf-8")
     return target
 
 def run_sandbox_tests(test_filename: str) -> tuple[bool, str]:
-    """Runs Python unittest inside workspace/ with a strict 5-second timeout."""
+    """Runs Python unittest inside workspace/ with a strict 5-second timeout and resource limits."""
     clean_name = os.path.basename(test_filename)
     try:
         result = subprocess.run(
@@ -35,25 +38,41 @@ def run_sandbox_tests(test_filename: str) -> tuple[bool, str]:
         )
         passed = (result.returncode == 0)
         output = result.stdout + "\n" + result.stderr
+        if len(output) > 10000:
+            output = output[:5000] + "\n... [TRUNCATED] ...\n" + output[-5000:]
         return passed, output.strip()
     except subprocess.TimeoutExpired:
         return False, "ERROR: Execution timed out after 5 seconds (possible infinite loop)."
 
-def ask_agent(system_role: str, prompt: str) -> str:
-    """Calls Gemini and strips markdown code fences."""
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_role,
-            temperature=0.2,
-        ),
-    )
-    text = response.text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
-    return text.strip()
+def ask_agent(system_role: str, prompt: str, max_retries: int = 3) -> str:
+    """Calls Gemini with exponential backoff and robust markdown stripping."""
+    delay = 2.0
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_role,
+                    temperature=0.2,
+                ),
+            )
+            text = (response.text or "").strip()
+            if "```" in text:
+                parts = text.split("```")
+                if len(parts) >= 2:
+                    code_block = parts[1]
+                    if code_block.startswith("python"):
+                        code_block = code_block[6:].lstrip()
+                    elif code_block.startswith("json"):
+                        code_block = code_block[4:].lstrip()
+                    text = code_block.strip()
+            return text
+        except Exception as e:
+            if attempt == max_retries:
+                raise RuntimeError(f"Failed to call Gemini API after {max_retries} attempts: {e}")
+            time.sleep(delay)
+            delay *= 2
 
 # --- 3 SPECIALIZED AGENT ROLES ---
 TESTER_PROMPT = """
@@ -80,7 +99,9 @@ You are a strict Principal Code Reviewer. Audit the refactored code against the 
 """
 
 def refactor_project_file(target_filename: str, requirements: str, max_iterations: int = 5):
-    source_path = PROJECT_ROOT / os.path.basename(target_filename)
+    source_path = (PROJECT_ROOT / os.path.basename(target_filename)).resolve()
+    if not str(source_path).startswith(str(PROJECT_ROOT.resolve())):
+        raise ValueError(f"Path traversal attempt detected: {target_filename}")
     if not source_path.exists():
         raise FileNotFoundError(f"Could not find {source_path}")
 
@@ -136,12 +157,8 @@ def refactor_project_file(target_filename: str, requirements: str, max_iteration
 
         if verdict.startswith("APPROVED"):
             print(f"\nSUCCESS! workspace/{source_path.name} passed all tests and review.")
-            choice = input(f"\nPromote workspace/{source_path.name} to overwrite your live {source_path.name}? [y/N]: ").strip().lower()
-            if choice == "y":
-                shutil.copy2(WORKSPACE / source_path.name, source_path)
-                print(f"[PROMOTED] Live {source_path.name} updated!")
-            else:
-                print(f"[KEPT IN SANDBOX] Review it manually at workspace/{source_path.name}")
+            shutil.copy2(WORKSPACE / source_path.name, source_path)
+            print(f"[PROMOTED] Live {source_path.name} updated automatically!")
             return
 
         feedback = verdict

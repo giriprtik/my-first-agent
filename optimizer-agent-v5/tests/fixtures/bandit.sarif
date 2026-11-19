@@ -1,0 +1,311 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Bandit",
+          "organization": "PyCQA",
+          "rules": [
+            {
+              "id": "B403",
+              "name": "blacklist",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-502"
+                ],
+                "precision": "high"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b403-import-pickle"
+            },
+            {
+              "id": "B608",
+              "name": "hardcoded_sql_expressions",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-89"
+                ],
+                "precision": "medium"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html"
+            },
+            {
+              "id": "B602",
+              "name": "subprocess_popen_with_shell_equals_true",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-78"
+                ],
+                "precision": "high"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b602_subprocess_popen_with_shell_equals_true.html"
+            },
+            {
+              "id": "B301",
+              "name": "blacklist",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-502"
+                ],
+                "precision": "high"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b301-pickle"
+            },
+            {
+              "id": "B506",
+              "name": "yaml_load",
+              "properties": {
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-20"
+                ],
+                "precision": "high"
+              },
+              "helpUri": "https://bandit.readthedocs.io/en/1.9.4/plugins/b506_yaml_load.html"
+            }
+          ],
+          "version": "1.9.4",
+          "semanticVersion": "1.9.4"
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "endTimeUtc": "2026-11-19T04:55:02Z"
+        }
+      ],
+      "properties": {
+        "metrics": {
+          "_totals": {
+            "loc": 14,
+            "nosec": 0,
+            "skipped_tests": 0,
+            "SEVERITY.UNDEFINED": 0,
+            "CONFIDENCE.UNDEFINED": 0,
+            "SEVERITY.LOW": 1,
+            "CONFIDENCE.LOW": 0,
+            "SEVERITY.MEDIUM": 3,
+            "CONFIDENCE.MEDIUM": 1,
+            "SEVERITY.HIGH": 1,
+            "CONFIDENCE.HIGH": 4
+          },
+          "./typed.py": {
+            "loc": 6,
+            "nosec": 0,
+            "skipped_tests": 0,
+            "SEVERITY.UNDEFINED": 0,
+            "SEVERITY.LOW": 0,
+            "SEVERITY.MEDIUM": 0,
+            "SEVERITY.HIGH": 0,
+            "CONFIDENCE.UNDEFINED": 0,
+            "CONFIDENCE.LOW": 0,
+            "CONFIDENCE.MEDIUM": 0,
+            "CONFIDENCE.HIGH": 0
+          },
+          "./vuln.py": {
+            "loc": 8,
+            "nosec": 0,
+            "skipped_tests": 0,
+            "SEVERITY.UNDEFINED": 0,
+            "SEVERITY.LOW": 1,
+            "SEVERITY.MEDIUM": 3,
+            "SEVERITY.HIGH": 1,
+            "CONFIDENCE.UNDEFINED": 0,
+            "CONFIDENCE.LOW": 0,
+            "CONFIDENCE.MEDIUM": 1,
+            "CONFIDENCE.HIGH": 4
+          }
+        }
+      },
+      "results": [
+        {
+          "message": {
+            "text": "Consider possible security implications associated with pickle module."
+          },
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "import subprocess, sqlite3, pickle, yaml\n"
+                  },
+                  "endColumn": 41,
+                  "endLine": 1,
+                  "startColumn": 1,
+                  "startLine": 1
+                },
+                "artifactLocation": {
+                  "uri": "vuln.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "import subprocess, sqlite3, pickle, yaml\n\ndef q(name):\n"
+                  },
+                  "endLine": 3,
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "HIGH",
+            "issue_severity": "LOW"
+          },
+          "ruleId": "B403",
+          "ruleIndex": 0
+        },
+        {
+          "message": {
+            "text": "Possible SQL injection vector through string-based query construction."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    c.execute(\"select * from t where n = '%s'\" % name)\n"
+                  },
+                  "endColumn": 47,
+                  "endLine": 5,
+                  "startColumn": 15,
+                  "startLine": 5
+                },
+                "artifactLocation": {
+                  "uri": "vuln.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "    c = sqlite3.connect(\"x\").cursor()\n    c.execute(\"select * from t where n = '%s'\" % name)\n    subprocess.call(\"ls \" + name, shell=True)\n"
+                  },
+                  "endLine": 6,
+                  "startLine": 4
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "MEDIUM",
+            "issue_severity": "MEDIUM"
+          },
+          "ruleId": "B608",
+          "ruleIndex": 1
+        },
+        {
+          "message": {
+            "text": "subprocess call with shell=True identified, security issue."
+          },
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    subprocess.call(\"ls \" + name, shell=True)\n"
+                  },
+                  "endColumn": 46,
+                  "endLine": 6,
+                  "startColumn": 5,
+                  "startLine": 6
+                },
+                "artifactLocation": {
+                  "uri": "vuln.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "    c.execute(\"select * from t where n = '%s'\" % name)\n    subprocess.call(\"ls \" + name, shell=True)\n    return pickle.loads(name.encode())\n"
+                  },
+                  "endLine": 7,
+                  "startLine": 5
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "HIGH",
+            "issue_severity": "HIGH"
+          },
+          "ruleId": "B602",
+          "ruleIndex": 2
+        },
+        {
+          "message": {
+            "text": "Pickle and modules that wrap it can be unsafe when used to deserialize untrusted data, possible security issue."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    return pickle.loads(name.encode())\n"
+                  },
+                  "endColumn": 39,
+                  "endLine": 7,
+                  "startColumn": 12,
+                  "startLine": 7
+                },
+                "artifactLocation": {
+                  "uri": "vuln.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "    subprocess.call(\"ls \" + name, shell=True)\n    return pickle.loads(name.encode())\n\n"
+                  },
+                  "endLine": 8,
+                  "startLine": 6
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "HIGH",
+            "issue_severity": "MEDIUM"
+          },
+          "ruleId": "B301",
+          "ruleIndex": 3
+        },
+        {
+          "message": {
+            "text": "Use of unsafe yaml load. Allows instantiation of arbitrary objects. Consider yaml.safe_load()."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "region": {
+                  "snippet": {
+                    "text": "    return yaml.load(text)\n"
+                  },
+                  "endColumn": 27,
+                  "endLine": 10,
+                  "startColumn": 12,
+                  "startLine": 10
+                },
+                "artifactLocation": {
+                  "uri": "vuln.py"
+                },
+                "contextRegion": {
+                  "snippet": {
+                    "text": "def cfg(text):\n    return yaml.load(text)\n"
+                  },
+                  "endLine": 10,
+                  "startLine": 9
+                }
+              }
+            }
+          ],
+          "properties": {
+            "issue_confidence": "HIGH",
+            "issue_severity": "MEDIUM"
+          },
+          "ruleId": "B506",
+          "ruleIndex": 4
+        }
+      ]
+    }
+  ],
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json"
+}
